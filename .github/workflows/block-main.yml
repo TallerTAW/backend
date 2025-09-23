@@ -1,0 +1,15 @@
+name: Block Push to Main
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  block:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prevent push to main
+        run: |
+          echo "🚫 Push directo a main está prohibido. Usa Pull Requests."
+          exit 1
