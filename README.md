@@ -1,4 +1,4 @@
-# 🚀 Proyecto FastAPI
+# 🚀 Backend Taller TAW
 
 Este proyecto está construido con **FastAPI** y **Uvicorn**.  
 Sigue los pasos para instalarlo y ejecutarlo en tu máquina.
@@ -15,8 +15,8 @@ Sigue los pasos para instalarlo y ejecutarlo en tu máquina.
 
 1. **Clonar el repositorio**
    ```bash
-   git clone https://github.com/usuario/mi_proyecto_fastapi.git
-   cd mi_proyecto_fastapi
+   git clone https://github.com/TallerTAW/backend.git
+   cd backend
 
 2. **Crear entorno virtual**
    ```bash
