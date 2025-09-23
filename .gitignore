@@ -67,3 +67,12 @@ pip-wheel-metadata/
 docker-compose.override.yml
 .env
 *.env
+
+# Yml files
+*.yml
+*.yaml
+.github/workflows/
+.gitlab-ci.yml
+.circleci/
+.ci/rcleci/
+.gitignore
