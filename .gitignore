@@ -1,0 +1,69 @@
+# 🚫 Entorno virtual
+venv/
+ENV/
+env/
+.venv/
+
+# 🚫 Archivos de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyd
+*.pdb
+*.egg
+*.egg-info/
+*.manifest
+*.spec
+
+# 🚫 Dependencias compiladas
+*.so
+*.dll
+*.dylib
+
+# 🚫 Archivos de log
+*.log
+logs/
+*.out
+
+# 🚫 Archivos temporales
+*.tmp
+*.swp
+*.swo
+*.bak
+*.orig
+
+# 🚫 Configuración de IDEs y editores
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# 🚫 Archivos del sistema
+.DS_Store
+Thumbs.db
+
+# 🚫 Archivos de pruebas / coverage
+.coverage
+htmlcov/
+.tox/
+.nox/
+.pytest_cache/
+.coverage.*
+.cache/
+
+# 🚫 Distribución y empaquetado
+build/
+dist/
+pip-wheel-metadata/
+.eggs/
+
+# 🚫 Notebooks y datasets temporales
+*.ipynb_checkpoints
+*.csv
+*.sqlite3
+
+# 🚫 Docker (si usas después)
+docker-compose.override.yml
+.env
+*.env
