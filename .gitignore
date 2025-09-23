@@ -63,7 +63,7 @@ pip-wheel-metadata/
 *.csv
 *.sqlite3
 
-# 🚫 Docker (si usas después)
+# 🚫 Docker
 docker-compose.override.yml
 .env
 *.env
