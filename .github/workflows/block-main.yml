@@ -9,7 +9,11 @@ jobs:
   block:
     runs-on: ubuntu-latest
     steps:
-      - name: Prevent push to main
+      - name: Check user
         run: |
-          echo "🚫 Push directo a main está prohibido. Usa Pull Requests."
-          exit 1
+          if [ "${{ github.actor }}" != "leaox77" ]; then
+            echo "🚫 Push directo a main prohibido. Usa Pull Requests."
+            exit 1
+          else
+            echo "✅ Push permitido para admin (${GITHUB_ACTOR})"
+          fi
