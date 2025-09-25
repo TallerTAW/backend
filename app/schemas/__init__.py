@@ -2,6 +2,7 @@ from .auth import *
 from .usuario import *
 from .espacio_deportivo import *
 from .cancha import *
+from .cupon import *
 from .disciplina import *
 from .reserva import *
 from .pago import *
@@ -18,6 +19,9 @@ __all__ = [
     
     # Cancha
     "CanchaBase", "CanchaCreate", "CanchaUpdate", "CanchaResponse",
+
+    # Cupon
+    "CuponBase", "CuponCreate", "CuponUpdate", "CuponResponse", "CuponAplicar", "CuponGenerarLote",
     
     # Disciplina
     "DisciplinaBase", "DisciplinaCreate", "DisciplinaUpdate", "DisciplinaResponse",
