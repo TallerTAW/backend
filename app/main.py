@@ -4,6 +4,7 @@ from app.routers import (
     auth, reservas_opcion, usuarios, espacios, canchas, disciplinas, cupones,
     pagos, reportes, control_acceso
 )
+from app.routers import incidentes, comentarios
 from app.database import engine, Base
 
 # Crear tablas
@@ -35,6 +36,8 @@ app.include_router(reservas_opcion.router, prefix="/reservas", tags=["Reservas"]
 app.include_router(pagos.router, prefix="/pagos", tags=["Pagos"])
 app.include_router(reportes.router, prefix="/reportes", tags=["Reportes"])
 app.include_router(control_acceso.router, prefix="/control-acceso", tags=["Control de Acceso"])
+app.include_router(incidentes.router, prefix="/incidentes", tags=["Incidentes"])
+app.include_router(comentarios.router, prefix="/comentarios", tags=["Comentarios"])
 
 @app.get("/")
 def read_root():
