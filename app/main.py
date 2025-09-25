@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import (
     auth, reservas_opcion, usuarios, espacios, canchas, disciplinas, cupones,
-    pagos, reportes, control_acceso
+    pagos, reportes, control_acceso,cancelacion,cancha_disciplina,administra
 )
 from app.database import engine, Base
 
@@ -35,6 +35,9 @@ app.include_router(reservas_opcion.router, prefix="/reservas", tags=["Reservas"]
 app.include_router(pagos.router, prefix="/pagos", tags=["Pagos"])
 app.include_router(reportes.router, prefix="/reportes", tags=["Reportes"])
 app.include_router(control_acceso.router, prefix="/control-acceso", tags=["Control de Acceso"])
+app.include_router(cancelacion.router, prefix="/cancelaciones", tags=["Cancelaciones"])
+app.include_router(administra.router, prefix="/administracion", tags=["Administración"])
+app.include_router(cancha_disciplina.router, prefix="/canchas-disciplinas", tags=["Canchas y Disciplinas"])
 
 @app.get("/")
 def read_root():
