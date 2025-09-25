@@ -38,7 +38,7 @@ Sigue los pasos para instalarlo y ejecutarlo en tu máquina.
 
 5. **Ejecutar la aplicación**
    ```bash
-   uvicorn main:app --reload
+   uvicorn app.main:app --reload
    ```
     La aplicación estará disponible en `http://127.0.0.1:8000`
     ```
