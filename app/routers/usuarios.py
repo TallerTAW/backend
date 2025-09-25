@@ -8,8 +8,12 @@ from app.core.security import get_password_hash
 router = APIRouter()
 
 @router.get("/", response_model=list[UsuarioResponse])
-def get_usuarios(db: Session = Depends(get_db)):
-    return db.query(Usuario).all()
+def get_usuarios(include_inactive: bool = False, db: Session = Depends(get_db)):
+    """Obtener usuarios, incluir inactivos solo si se solicita"""
+    query = db.query(Usuario)
+    if not include_inactive:
+        query = query.filter(Usuario.estado == "activo")
+    return query.all()
 
 @router.get("/{usuario_id}", response_model=UsuarioResponse)
 def get_usuario(usuario_id: int, db: Session = Depends(get_db)):
@@ -31,15 +35,15 @@ def create_usuario(usuario_data: UsuarioCreate, db: Session = Depends(get_db)):
     # Hashear la contraseña
     hashed_password = get_password_hash(usuario_data.contrasenia)
     
-    # Crear el usuario (el id se genera automáticamente por SERIAL)
+    # Crear el usuario
     db_usuario = Usuario(
         nombre=usuario_data.nombre,
         apellido=usuario_data.apellido,
         email=usuario_data.email,
-        contrasenia=hashed_password,  # Usar el nombre correcto del campo
+        contrasenia=hashed_password,
         telefono=usuario_data.telefono,
         rol=usuario_data.rol,
-        estado=usuario_data.estado or "activo"  # Valor por defecto
+        estado=usuario_data.estado or "activo"
     )
     
     db.add(db_usuario)
@@ -74,20 +78,34 @@ def update_usuario(usuario_id: int, usuario_data: UsuarioUpdate, db: Session = D
     return usuario
 
 @router.delete("/{usuario_id}")
-def delete_usuario(usuario_id: int, db: Session = Depends(get_db)):
+def desactivar_usuario(usuario_id: int, db: Session = Depends(get_db)):
+    """Desactivar usuario (borrado lógico)"""
     usuario = db.query(Usuario).filter(Usuario.id_usuario == usuario_id).first()
     if not usuario:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
     
-    # En lugar de eliminar, podrías cambiar el estado a "inactivo"
-    # usuario.estado = "inactivo"
-    # db.commit()
-    # return {"detail": "Usuario marcado como inactivo"}
+    if usuario.estado == "inactivo":
+        raise HTTPException(status_code=400, detail="El usuario ya está inactivo")
     
-    # O eliminar físicamente
-    db.delete(usuario)
+    usuario.estado = "inactivo"
     db.commit()
-    return {"detail": "Usuario eliminado exitosamente"}
+    
+    return {"detail": "Usuario desactivado exitosamente"}
+
+@router.put("/{usuario_id}/activar")
+def activar_usuario(usuario_id: int, db: Session = Depends(get_db)):
+    """Reactivar un usuario previamente desactivado"""
+    usuario = db.query(Usuario).filter(Usuario.id_usuario == usuario_id).first()
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    
+    if usuario.estado == "activo":
+        raise HTTPException(status_code=400, detail="El usuario ya está activo")
+    
+    usuario.estado = "activo"
+    db.commit()
+    
+    return {"detail": "Usuario activado exitosamente"}
 
 @router.put("/{usuario_id}/cambiar-contrasenia")
 def cambiar_contrasenia(
