@@ -37,7 +37,7 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 
 @router.post("/register")
 def register(usuario_data: Register, db: Session = Depends(get_db)):
-    # Verificar si el email ya existe
+    # Verificar si el email ya existe wn
     existing_user = db.query(Usuario).filter(Usuario.email == usuario_data.email).first()
     if existing_user:
         raise HTTPException(
