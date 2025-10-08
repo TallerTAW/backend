@@ -1,14 +1,30 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
+
+# 🚨 AGREGAR/VERIFICAR: Importación necesaria para el objeto settings
+from app.config import settings 
+
 from app.database import get_db
 from app.models.usuario import Usuario
 from app.schemas.auth import Token, Login, Register
-from app.core.security import verify_password, get_password_hash, create_access_token
+from app.core.security import (
+    verify_password, 
+    get_password_hash, 
+    create_access_token # Esta función ya usa 'settings' internamente
+)
 from app.core.exceptions import AuthException
 
-router = APIRouter()
+# 🚨 Importaciones necesarias para get_current_user
+from datetime import datetime, timedelta
+from jose import JWTError, jwt
+
+router = APIRouter(prefix="/auth", tags=["Autenticación"])
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
+
+# -----------------------------------------------------------
+# RUTAS DE LOGIN Y REGISTRO
+# -----------------------------------------------------------
 
 @router.post("/login", response_model=Token)
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
@@ -20,6 +36,7 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     if usuario.estado != "activo":
         raise AuthException("Usuario inactivo")
     
+    # create_access_token usa 'settings' internamente
     access_token = create_access_token(
         data={"sub": usuario.email, "rol": usuario.rol, "id": usuario.id_usuario}
     )
@@ -37,7 +54,7 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 
 @router.post("/register")
 def register(usuario_data: Register, db: Session = Depends(get_db)):
-    # Verificar si el email ya existe wn
+    # Verificar si el email ya existe
     existing_user = db.query(Usuario).filter(Usuario.email == usuario_data.email).first()
     if existing_user:
         raise HTTPException(
@@ -61,3 +78,41 @@ def register(usuario_data: Register, db: Session = Depends(get_db)):
     db.refresh(nuevo_usuario)
     
     return {"message": "Usuario registrado exitosamente", "id": nuevo_usuario.id_usuario}
+
+
+# -----------------------------------------------------------
+# FUNCIÓN DE DEPENDENCIA PARA OBTENER USUARIO ACTUAL
+# -----------------------------------------------------------
+
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    """Decodifica el token y verifica la existencia y estado del usuario."""
+    
+    try:
+        # 🚨 CORRECCIÓN: Usar settings para decodificar
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        
+        email: str = payload.get("sub")
+        rol: str = payload.get("rol")
+        id_usuario: int = payload.get("id")
+        
+        # Opcional: Verificar expiración 
+        expires: datetime = payload.get("exp")
+        if expires and datetime.fromtimestamp(expires) < datetime.utcnow():
+            raise AuthException("Token expirado")
+        
+        if email is None or rol is None or id_usuario is None:
+            raise AuthException("Token de autenticación inválido")
+            
+    except JWTError:
+        raise AuthException("Token de autenticación inválido")
+
+    # Buscar el usuario en la BD
+    usuario = db.query(Usuario).filter(Usuario.id_usuario == id_usuario).first()
+
+    if usuario is None:
+        raise AuthException("Usuario no encontrado")
+
+    if usuario.estado != "activo":
+        raise AuthException("Usuario inactivo")
+        
+    return usuario

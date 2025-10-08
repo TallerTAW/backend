@@ -2,11 +2,17 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import (
     auth, reservas_opcion, usuarios, espacios, canchas, disciplinas, cupones,
-    pagos, reportes, control_acceso,cancelacion,cancha_disciplina,administra
+    pagos, reportes, control_acceso, cancelacion, cancha_disciplina, administra,
+    # 🚨 Importación del router de contenido
+    content 
 )
 from app.database import engine, Base
 
-# Crear tablas
+# 🚨 CORRECCIÓN 2: Importar explícitamente el modelo de contenido
+# Esto asegura que SQLAlchemy "vea" el modelo y cree la tabla.
+import app.models.website_content 
+
+# Crear tablas. Esto debe ejecutarse después de que todos los modelos hayan sido importados.
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
@@ -38,6 +44,11 @@ app.include_router(control_acceso.router, prefix="/control-acceso", tags=["Contr
 app.include_router(cancelacion.router, prefix="/cancelaciones", tags=["Cancelaciones"])
 app.include_router(administra.router, prefix="/administracion", tags=["Administración"])
 app.include_router(cancha_disciplina.router, prefix="/canchas-disciplinas", tags=["Canchas y Disciplinas"])
+
+# 🚨 CORRECCIÓN 1: Incluir el router de contenido SIN el prefijo redundante.
+# El prefijo "/content" ya está definido dentro de app/routers/content.py
+app.include_router(content.router, tags=["Contenido Dinámico"]) 
+
 
 @app.get("/")
 def read_root():
