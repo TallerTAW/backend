@@ -2,9 +2,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import (
     auth, reservas_opcion, usuarios, espacios, canchas, disciplinas, cupones,
-    pagos, reportes, control_acceso
+    pagos, reportes, control_acceso, content
 )
 from app.database import engine, Base
+from fastapi.staticfiles import StaticFiles
 
 # Crear tablas
 Base.metadata.create_all(bind=engine)
@@ -51,6 +52,9 @@ app.include_router(reservas_opcion.router, prefix="/reservas", tags=["Reservas"]
 app.include_router(pagos.router, prefix="/pagos", tags=["Pagos"])
 app.include_router(reportes.router, prefix="/reportes", tags=["Reportes"])
 app.include_router(control_acceso.router, prefix="/control-acceso", tags=["Control de Acceso"])
+app.include_router(content.router, prefix="/content", tags=["Contenido Dinámico"])
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/")
 def read_root():
