@@ -79,7 +79,7 @@ def update_cancha(cancha_id: int, cancha_data: CanchaUpdate, db: Session = Depen
         )
     
     # Verificar espacio deportivo si se está actualizando
-    if cancha_data.id_espacio_deportivo:
+    if cancha_data.id_espacio_deportivo is not None:
         espacio = db.query(EspacioDeportivo).filter(
             EspacioDeportivo.id_espacio_deportivo == cancha_data.id_espacio_deportivo
         ).first()
@@ -89,11 +89,14 @@ def update_cancha(cancha_id: int, cancha_data: CanchaUpdate, db: Session = Depen
                 detail="Espacio deportivo no encontrado"
             )
     
-    # Verificar nombre único si se está actualizando
-    if cancha_data.nombre and cancha_data.nombre != cancha.nombre:
+    # Verificar nombre único si se está actualizando - CORREGIDO
+    if cancha_data.nombre is not None and cancha_data.nombre != cancha.nombre:
+        # Determinar qué espacio deportivo usar para la verificación
+        espacio_id_verificar = cancha_data.id_espacio_deportivo if cancha_data.id_espacio_deportivo is not None else cancha.id_espacio_deportivo
+        
         existing_cancha = db.query(Cancha).filter(
             Cancha.nombre == cancha_data.nombre,
-            Cancha.id_espacio_deportivo == cancha_data.id_espacio_deportivo or cancha.id_espacio_deportivo,
+            Cancha.id_espacio_deportivo == espacio_id_verificar,
             Cancha.id_cancha != cancha_id
         ).first()
         
@@ -172,13 +175,13 @@ def activar_cancha(cancha_id: int, db: Session = Depends(get_db)):
             detail="Cancha no encontrada"
         )
     
-    if cancha.estado == "activa":
+    if cancha.estado == "disponible":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="La cancha ya está activa"
         )
     
-    cancha.estado = "activa"
+    cancha.estado = "disponible"
     db.commit()
     db.refresh(cancha)
     
