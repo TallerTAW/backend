@@ -1,5 +1,3 @@
-# BACKEND/app/routers/content.py
-
 from fastapi import APIRouter, Depends, HTTPException, status
 from typing import Dict, Any, List
 from sqlalchemy.orm import Session
@@ -42,14 +40,18 @@ def update_website_content(
     content_key: str, 
     update_data: ContentUpdate, 
     db: Session = Depends(get_db),
+    # La dependencia get_current_user se encarga de que haya un token válido (AuthException -> 401)
     current_user: Any = Depends(get_current_user) 
 ):
     """Actualiza el valor de una clave de contenido específica en la BD."""
     
     # 1. Verificación de Rol
+    # El rol en la BD es 'admin', lo cual debe pasar la verificación.
     if not allowed_roles(current_user, ['admin', 'gestor']):
+        # Si el token es válido pero el rol no tiene permiso, el status correcto es 403 Forbidden.
+        # 🚨 CORRECCIÓN: Aseguramos el uso de 403 para evitar la confusión con 401.
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=status.HTTP_403_FORBIDDEN, 
             detail="No tienes permiso para modificar el contenido del sitio."
         )
 
