@@ -38,7 +38,8 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 @router.post("/register")
 def register(usuario_data: Register, db: Session = Depends(get_db)):
     try:
-        # Verificar si el email ya existe
+        print(f"Datos recibidos en registro: {usuario_data}")
+        
         existing_user = db.query(Usuario).filter(Usuario.email == usuario_data.email).first()
         if existing_user:
             raise HTTPException(
@@ -46,8 +47,17 @@ def register(usuario_data: Register, db: Session = Depends(get_db)):
                 detail="El email ya está registrado"
             )
         
-        # Crear nuevo usuario
+        roles_permitidos = ["cliente", "gestor", "admin", "control_acceso"]
+        if usuario_data.rol not in roles_permitidos:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Rol no permitido. Roles válidos: {roles_permitidos}"
+            )
+        
+        print("Creando hash de contraseña...")
         hashed_password = get_password_hash(usuario_data.contrasenia)
+        print(f"Hash creado: {hashed_password[:20]}...")
+        
         nuevo_usuario = Usuario(
             nombre=usuario_data.nombre,
             apellido=usuario_data.apellido,
@@ -55,19 +65,26 @@ def register(usuario_data: Register, db: Session = Depends(get_db)):
             contrasenia=hashed_password,
             telefono=usuario_data.telefono,
             rol=usuario_data.rol,
-            estado="activo"  # Asegurar que el estado esté establecido
+            estado="activo"
         )
         
+        print("Agregando usuario a la base de datos...")
         db.add(nuevo_usuario)
         db.commit()
         db.refresh(nuevo_usuario)
         
+        print(f"Usuario registrado exitosamente: {nuevo_usuario.id_usuario}")
         return {"message": "Usuario registrado exitosamente", "id": nuevo_usuario.id_usuario}
     
+    except HTTPException:
+        raise
     except Exception as e:
         db.rollback()
-        print(f"Error en registro: {str(e)}")
+        print(f"Error completo en registro: {str(e)}")
+        print(f"Tipo de error: {type(e)}")
+        import traceback
+        print(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error interno del servidor"
+            detail=f"Error interno del servidor: {str(e)}"
         )
