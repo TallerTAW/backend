@@ -28,6 +28,7 @@ class Register(BaseModel):
     contrasenia: str
     telefono: Optional[str] = None
     rol: UserRole = UserRole.cliente
+    captcha_token: str 
 
     @validator('contrasenia')
     def password_length(cls, v):

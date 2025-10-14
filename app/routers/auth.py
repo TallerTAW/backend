@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Form
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from app.database import get_db
@@ -6,12 +6,29 @@ from app.models.usuario import Usuario
 from app.schemas.auth import Token, Login, Register
 from app.core.security import verify_password, get_password_hash, create_access_token
 from app.core.exceptions import AuthException
+from app.core.captcha import verificar_captcha
 
 router = APIRouter()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
 @router.post("/login", response_model=Token)
-def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+def login(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db),
+    captcha_token: str = Form(...)
+):
+    """
+    Inicia sesión validando usuario, contraseña y el token de reCAPTCHA.
+    """
+
+    # Verificar CAPTCHA
+    captcha_valido = verificar_captcha(captcha_token)
+    if not captcha_valido:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Captcha inválido. Inténtalo de nuevo."
+        )
+
     usuario = db.query(Usuario).filter(Usuario.email == form_data.username).first()
     
     if not usuario or not verify_password(form_data.password, usuario.contrasenia):
@@ -37,8 +54,25 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 
 @router.post("/register")
 def register(usuario_data: Register, db: Session = Depends(get_db)):
+    """
+    Registra un nuevo usuario, validando el token de reCAPTCHA.
+    """
     try:
         print(f"Datos recibidos en registro: {usuario_data}")
+
+        # Verificar CAPTCHA
+        if not usuario_data.captcha_token:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Token de captcha no proporcionado"
+            )
+
+        captcha_valido = verificar_captcha(usuario_data.captcha_token)
+        if not captcha_valido:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Captcha inválido. Inténtalo de nuevo."
+            )
         
         existing_user = db.query(Usuario).filter(Usuario.email == usuario_data.email).first()
         if existing_user:
@@ -56,7 +90,6 @@ def register(usuario_data: Register, db: Session = Depends(get_db)):
         
         print("Creando hash de contraseña...")
         hashed_password = get_password_hash(usuario_data.contrasenia)
-        print(f"Hash creado: {hashed_password[:20]}...")
         
         nuevo_usuario = Usuario(
             nombre=usuario_data.nombre,
@@ -68,7 +101,6 @@ def register(usuario_data: Register, db: Session = Depends(get_db)):
             estado="activo"
         )
         
-        print("Agregando usuario a la base de datos...")
         db.add(nuevo_usuario)
         db.commit()
         db.refresh(nuevo_usuario)
@@ -81,7 +113,6 @@ def register(usuario_data: Register, db: Session = Depends(get_db)):
     except Exception as e:
         db.rollback()
         print(f"Error completo en registro: {str(e)}")
-        print(f"Tipo de error: {type(e)}")
         import traceback
         print(f"Traceback: {traceback.format_exc()}")
         raise HTTPException(
