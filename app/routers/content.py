@@ -7,9 +7,14 @@ from app.database import get_db
 from app.models.website_content import WebsiteContent # Asume que este modelo existe
 from app.schemas.content import ContentUpdate 
 
+# 🚨 Importaciones de Seguridad y Roles
+from .auth import get_current_user 
 from app.core.core import allowed_roles # Asume que esta función ya fue creada en app/core/core.py
 
-router = APIRouter()
+router = APIRouter(
+    prefix="/content",
+    tags=["Contenido Dinámico"]
+)
 
 # -----------------------------------------------------------
 # RUTA GET (Solo Lectura)
@@ -34,13 +39,36 @@ def get_website_content(db: Session = Depends(get_db)):
 def update_website_content(
     content_key: str, 
     update_data: ContentUpdate, 
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    # La dependencia get_current_user se encarga de que haya un token válido (AuthException -> 401)
+    current_user: Any = Depends(get_current_user) 
 ):
-    """Actualiza un contenido sin validación de usuario."""
-    content_item = db.query(WebsiteContent).filter(WebsiteContent.key == content_key).first()
+    """Actualiza el valor de una clave de contenido específica en la BD."""
+    
+    # 1. Verificación de Rol
+    # El rol en la BD es 'admin', lo cual debe pasar la verificación.
+    if not allowed_roles(current_user, ['admin', 'gestor']):
+        # Si el token es válido pero el rol no tiene permiso, el status correcto es 403 Forbidden.
+        # 🚨 CORRECCIÓN: Aseguramos el uso de 403 para evitar la confusión con 401.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="No tienes permiso para modificar el contenido del sitio."
+        )
+
+    # 2. Buscar el contenido por la clave
+    content_item: WebsiteContent = db.query(WebsiteContent).filter(
+        WebsiteContent.key == content_key
+    ).first()
+
     if not content_item:
-        raise HTTPException(status_code=404, detail=f"Clave '{content_key}' no encontrada.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Clave de contenido '{content_key}' no encontrada."
+        )
+
+    # 3. Actualizar el valor y guardar
     content_item.value = update_data.new_value
     db.commit()
     db.refresh(content_item)
+
     return {"message": f"Contenido '{content_key}' actualizado exitosamente."}
