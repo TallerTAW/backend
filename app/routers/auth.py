@@ -12,23 +12,7 @@ router = APIRouter()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
 @router.post("/login", response_model=Token)
-def login(
-    form_data: OAuth2PasswordRequestForm = Depends(),
-    db: Session = Depends(get_db),
-    captcha_token: str = Form(...)
-):
-    """
-    Inicia sesión validando usuario, contraseña y el token de reCAPTCHA.
-    """
-
-    # Verificar CAPTCHA
-    captcha_valido = verificar_captcha(captcha_token)
-    if not captcha_valido:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Captcha inválido. Inténtalo de nuevo."
-        )
-
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     usuario = db.query(Usuario).filter(Usuario.email == form_data.username).first()
     
     if not usuario or not verify_password(form_data.password, usuario.contrasenia):
