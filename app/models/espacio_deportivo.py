@@ -12,6 +12,7 @@ class EspacioDeportivo(Base):
     capacidad = Column(Integer)
     estado = Column(String(20), default="activo")
     descripcion = Column(Text)
+    imagen = Column(String(255)) 
     fecha_creacion = Column(DateTime(timezone=True), server_default=func.now())
     
     # Relaciones
