@@ -14,6 +14,7 @@ class Cancha(Base):
     precio_por_hora = Column(Numeric(10, 2), nullable=False)
     estado = Column(String(20), default="disponible")
     id_espacio_deportivo = Column(Integer, ForeignKey("espacio_deportivo.id_espacio_deportivo", ondelete="CASCADE"))
+    imagen = Column(String(255))
     fecha_creacion = Column(DateTime(timezone=True), server_default=func.now())
     
     # Relaciones
