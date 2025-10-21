@@ -1,14 +1,83 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
+from sqlalchemy import text
+from datetime import date
 from app.database import get_db
 from app.models.cancha import Cancha
 from app.models.espacio_deportivo import EspacioDeportivo
 from app.models.administra import Administra
-from app.schemas.cancha import CanchaResponse, CanchaCreate, CanchaUpdate
+from app.schemas.cancha import CanchaResponse, CanchaCreate, CanchaUpdate, DisponibilidadResponse, HorarioDisponible
 from app.core.security import get_current_user
 from app.models.usuario import Usuario
 
 router = APIRouter()
+
+@router.get("/{cancha_id}/disponibilidad", response_model=DisponibilidadResponse)
+def get_disponibilidad_cancha(
+    cancha_id: int,
+    fecha: str = Query(..., description="Fecha en formato YYYY-MM-DD"),
+    db: Session = Depends(get_db)
+):
+    """Obtener horarios disponibles de una cancha usando la función PostgreSQL"""
+    try:
+        # Convertir string a date
+        fecha_date = date.fromisoformat(fecha)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Formato de fecha inválido. Use YYYY-MM-DD"
+        )
+    
+    # Verificar que la cancha existe
+    cancha = db.query(Cancha).filter(Cancha.id_cancha == cancha_id).first()
+    if not cancha:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Cancha no encontrada"
+        )
+    
+    try:
+        # Ejecutar la función PostgreSQL
+        result = db.execute(
+            text("SELECT * FROM listar_horarios_disponibles(:cancha_id, :fecha)"),
+            {"cancha_id": cancha_id, "fecha": fecha_date}
+        )
+        
+        horarios = []
+        for row in result:
+            horarios.append(HorarioDisponible(
+                hora_inicio=row.hora_inicio,
+                hora_fin=row.hora_fin,
+                disponible=row.disponible,
+                precio_hora=row.precio_hora,
+                mensaje=row.mensaje
+            ))
+        
+        return DisponibilidadResponse(
+            cancha_id=cancha_id,
+            fecha=fecha,
+            horarios=horarios
+        )
+        
+    except Exception as e:
+        # Debug: imprime el error real
+        print(f"Error en disponibilidad: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al obtener disponibilidad: {str(e)}"
+        )
+
+@router.get("/public/{cancha_id}/disponibilidad", response_model=DisponibilidadResponse)
+def get_disponibilidad_cancha_public(
+    cancha_id: int,
+    fecha: str = Query(..., description="Fecha en formato YYYY-MM-DD"),
+    db: Session = Depends(get_db)
+):
+    """Obtener horarios disponibles de una cancha (público)"""
+    return get_disponibilidad_cancha(cancha_id, fecha, db)
 
 def obtener_canchas_por_rol(current_user: Usuario, db: Session):
     """Obtener canchas según el rol del usuario"""

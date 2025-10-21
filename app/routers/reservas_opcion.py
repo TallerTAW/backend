@@ -12,6 +12,9 @@ from app.schemas.reserva import ReservaResponse, ReservaCreate, ReservaUpdate
 from app.core.security import get_password_hash
 import random
 import string
+from app.schemas.cancha import VerificarDisponibilidadRequest
+from sqlalchemy import text
+
 
 router = APIRouter()
 
@@ -90,7 +93,7 @@ def get_reserva(reserva_id: int, db: Session = Depends(get_db)):
 
 @router.post("/", response_model=ReservaResponse)
 def create_reserva(reserva_data: ReservaCreate, db: Session = Depends(get_db)):
-    """Crear una nueva reserva"""
+    """Crear una nueva reserva con validación de disponibilidad usando función PostgreSQL"""
     # Verificar que la cancha existe
     cancha = db.query(Cancha).filter(Cancha.id_cancha == reserva_data.id_cancha).first()
     if not cancha:
@@ -106,12 +109,30 @@ def create_reserva(reserva_data: ReservaCreate, db: Session = Depends(get_db)):
     if not usuario:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
     
-    # Verificar que la cancha esté disponible
-    if not verificar_disponibilidad_cancha(
-        db, reserva_data.id_cancha, reserva_data.fecha_reserva, 
-        reserva_data.hora_inicio, reserva_data.hora_fin
-    ):
-        raise HTTPException(status_code=400, detail="La cancha no está disponible en el horario solicitado")
+    # VERIFICAR DISPONIBILIDAD USANDO FUNCIÓN POSTGRESQL
+    try:
+        result = db.execute(
+            text("SELECT verificar_disponibilidad(:cancha_id, :fecha, :hora_inicio, :hora_fin) as disponible"),
+            {
+                "cancha_id": reserva_data.id_cancha,
+                "fecha": reserva_data.fecha_reserva,
+                "hora_inicio": reserva_data.hora_inicio,
+                "hora_fin": reserva_data.hora_fin
+            }
+        )
+        disponible = result.scalar()
+        
+        if not disponible:
+            raise HTTPException(
+                status_code=400, 
+                detail="La cancha no está disponible en el horario solicitado"
+            )
+            
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al verificar disponibilidad: {str(e)}"
+        )
     
     # Verificar que el horario esté dentro del rango de la cancha
     if reserva_data.hora_inicio < cancha.hora_apertura or reserva_data.hora_fin > cancha.hora_cierre:
@@ -126,7 +147,7 @@ def create_reserva(reserva_data: ReservaCreate, db: Session = Depends(get_db)):
     
     # Calcular costo total
     costo_total = calcular_costo_total(
-        reserva_data.hora_inicio, reserva_data.hora_fin, cancha.precio_por_hora
+        reserva_data.hora_inicio, reserva_data.hora_fin, float(cancha.precio_por_hora)
     )
     
     # Generar código único de reserva

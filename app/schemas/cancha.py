@@ -1,6 +1,6 @@
 # app/schemas/cancha.py
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
 from datetime import time, datetime  # ← Añadir datetime
 from decimal import Decimal
 
@@ -33,3 +33,25 @@ class CanchaResponse(CanchaBase):
     
     class Config:
         from_attributes = True
+
+class HorarioDisponible(BaseModel):
+    hora_inicio: time
+    hora_fin: time
+    disponible: bool
+    precio_hora: Decimal
+    mensaje: str
+
+    class Config:
+        from_attributes = True
+
+class DisponibilidadResponse(BaseModel):
+    cancha_id: int
+    fecha: str
+    horarios: List[HorarioDisponible]
+    success: bool = True
+
+class VerificarDisponibilidadRequest(BaseModel):
+    fecha_reserva: str
+    hora_inicio: time
+    hora_fin: time
+    id_cancha: int
