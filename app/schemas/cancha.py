@@ -12,6 +12,7 @@ class CanchaBase(BaseModel):
     precio_por_hora: Decimal = Field(..., gt=0, description="Precio por hora de uso")
     estado: Optional[str] = Field("disponible", description="Estado de la cancha")
     id_espacio_deportivo: int = Field(..., description="ID del espacio deportivo al que pertenece")
+    imagen: Optional[str] = Field(None, max_length=255, description="URL de la imagen de la cancha")
 
 class CanchaCreate(CanchaBase):
     pass
@@ -24,6 +25,7 @@ class CanchaUpdate(BaseModel):
     precio_por_hora: Optional[Decimal] = Field(None, gt=0)
     estado: Optional[str] = Field(None, pattern="^(disponible|mantenimiento|inactiva)$")
     id_espacio_deportivo: Optional[int] = None
+    imagen: Optional[str] = Field(None, max_length=255)
 
 class CanchaResponse(CanchaBase):
     id_cancha: int

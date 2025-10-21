@@ -8,6 +8,7 @@ class EspacioDeportivoBase(BaseModel):
    capacidad: Optional[int] = Field(None, ge=1)
    estado: Optional[str] = Field("activo", pattern="^(activo|inactivo)$")
    descripcion: Optional[str] = None
+   imagen: Optional[str] = Field(None, max_length=255)
 
 class EspacioDeportivoCreate(EspacioDeportivoBase):
     pass
@@ -18,6 +19,7 @@ class EspacioDeportivoUpdate(BaseModel):
     capacidad: Optional[int] = Field(None, ge=1)
     estado: Optional[str] = Field(None, pattern="^(activo|inactivo)$")
     descripcion: Optional[str] = None
+    imagen: Optional[str] = Field(None, max_length=255)
 
 class EspacioDeportivoResponse(EspacioDeportivoBase):
     id_espacio_deportivo: int
