@@ -1,8 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import (
-    auth, reservas_opcion, usuarios, espacios, canchas, disciplinas, cupones,
-    pagos, reportes, control_acceso, content, incidentes, comentarios
+    auth, notifications, reservas_opcion, usuarios, espacios, canchas, disciplinas, cupones,
+    pagos, reportes, control_acceso, content, incidentes, comentarios, notifications
 )
 from app.database import engine, Base
 from fastapi.staticfiles import StaticFiles
@@ -55,6 +55,7 @@ app.include_router(control_acceso.router, prefix="/control-acceso", tags=["Contr
 app.include_router(content.router, prefix="/content", tags=["Contenido Dinámico"])
 app.include_router(incidentes.router, prefix="/incidentes", tags=["Incidentes"])
 app.include_router(comentarios.router, prefix="/comentarios", tags=["Comentarios"])
+app.include_router(notifications.router, prefix="/notificaciones", tags=["Notificaciones"])
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
