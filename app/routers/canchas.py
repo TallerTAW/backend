@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from datetime import date
@@ -9,6 +9,35 @@ from app.models.administra import Administra
 from app.schemas.cancha import CanchaResponse, CanchaCreate, CanchaUpdate, DisponibilidadResponse, HorarioDisponible
 from app.core.security import get_current_user
 from app.models.usuario import Usuario
+import os
+import shutil
+from typing import Optional
+import uuid
+
+UPLOAD_DIR_CANCHAS = "static/uploads/espacios/canchas"
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
+MAX_FILE_SIZE = 5 * 1024 * 1024
+
+os.makedirs(UPLOAD_DIR_CANCHAS, exist_ok=True)
+
+def allowed_file(filename: str) -> bool:
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def save_uploaded_file_cancha(file: UploadFile) -> str:
+    """Guarda un archivo subido para canchas y retorna la ruta relativa"""
+    if not allowed_file(file.filename):
+        raise HTTPException(status_code=400, detail="Tipo de archivo no permitido")
+    
+    # Generar nombre único
+    file_extension = file.filename.rsplit('.', 1)[1].lower()
+    unique_filename = f"{uuid.uuid4().hex}.{file_extension}"
+    file_path = os.path.join(UPLOAD_DIR_CANCHAS, unique_filename)
+    
+    # Guardar archivo
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    
+    return f"/{UPLOAD_DIR_CANCHAS}/{unique_filename}"
 
 router = APIRouter()
 
@@ -181,20 +210,27 @@ def get_canchas_por_espacio(
     return db.query(Cancha).filter(Cancha.id_espacio_deportivo == espacio_id).all()
 
 @router.post("/", response_model=CanchaResponse)
-def create_cancha(
-    cancha_data: CanchaCreate, 
+async def create_cancha(
+    nombre: str = Form(...),
+    tipo: Optional[str] = Form(None),
+    hora_apertura: str = Form(...),
+    hora_cierre: str = Form(...),
+    precio_por_hora: float = Form(...),
+    id_espacio_deportivo: int = Form(...),
+    estado: str = Form("disponible"),
+    imagen: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
     current_user: Usuario = Depends(get_current_user)
 ):
-    """Crear una nueva cancha con control de permisos"""
-    if not verificar_permiso_espacio(current_user, cancha_data.id_espacio_deportivo, db):
+    """Crear una nueva cancha con imagen"""
+    if not verificar_permiso_espacio(current_user, id_espacio_deportivo, db):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No tienes permisos para crear canchas en este espacio deportivo"
         )
     
     espacio = db.query(EspacioDeportivo).filter(
-        EspacioDeportivo.id_espacio_deportivo == cancha_data.id_espacio_deportivo
+        EspacioDeportivo.id_espacio_deportivo == id_espacio_deportivo
     ).first()
     
     if not espacio:
@@ -204,8 +240,8 @@ def create_cancha(
         )
     
     existing_cancha = db.query(Cancha).filter(
-        Cancha.nombre == cancha_data.nombre,
-        Cancha.id_espacio_deportivo == cancha_data.id_espacio_deportivo
+        Cancha.nombre == nombre,
+        Cancha.id_espacio_deportivo == id_espacio_deportivo
     ).first()
     
     if existing_cancha:
@@ -214,20 +250,50 @@ def create_cancha(
             detail="Ya existe una cancha con ese nombre en este espacio deportivo"
         )
     
-    nueva_cancha = Cancha(**cancha_data.dict())
+    # Procesar imagen si se proporciona
+    imagen_path = None
+    if imagen and imagen.size > 0:
+        if imagen.size > MAX_FILE_SIZE:
+            raise HTTPException(status_code=400, detail="La imagen es demasiado grande (máximo 5MB)")
+        imagen_path = save_uploaded_file_cancha(imagen)
+    
+    # Convertir horas de string a time
+    from datetime import time
+    hora_apertura_time = time.fromisoformat(hora_apertura)
+    hora_cierre_time = time.fromisoformat(hora_cierre)
+    
+    nueva_cancha = Cancha(
+        nombre=nombre,
+        tipo=tipo,
+        hora_apertura=hora_apertura_time,
+        hora_cierre=hora_cierre_time,
+        precio_por_hora=precio_por_hora,
+        id_espacio_deportivo=id_espacio_deportivo,
+        estado=estado,
+        imagen=imagen_path
+    )
+    
     db.add(nueva_cancha)
     db.commit()
     db.refresh(nueva_cancha)
     return nueva_cancha
 
+
 @router.put("/{cancha_id}", response_model=CanchaResponse)
-def update_cancha(
-    cancha_id: int, 
-    cancha_data: CanchaUpdate, 
+async def update_cancha(
+    cancha_id: int,
+    nombre: Optional[str] = Form(None),
+    tipo: Optional[str] = Form(None),
+    hora_apertura: Optional[str] = Form(None),
+    hora_cierre: Optional[str] = Form(None),
+    precio_por_hora: Optional[float] = Form(None),
+    id_espacio_deportivo: Optional[int] = Form(None),
+    estado: Optional[str] = Form(None),
+    imagen: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
     current_user: Usuario = Depends(get_current_user)
 ):
-    """Actualizar una cancha existente con control de permisos"""
+    """Actualizar una cancha existente con imagen"""
     if not verificar_permiso_cancha(current_user, cancha_id, db):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -241,15 +307,16 @@ def update_cancha(
             detail="Cancha no encontrada"
         )
     
-    if cancha_data.id_espacio_deportivo is not None:
-        if not verificar_permiso_espacio(current_user, cancha_data.id_espacio_deportivo, db):
+    # Verificar permisos si se cambia el espacio deportivo
+    if id_espacio_deportivo is not None:
+        if not verificar_permiso_espacio(current_user, id_espacio_deportivo, db):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="No tienes permisos para mover la cancha a este espacio deportivo"
             )
         
         espacio = db.query(EspacioDeportivo).filter(
-            EspacioDeportivo.id_espacio_deportivo == cancha_data.id_espacio_deportivo
+            EspacioDeportivo.id_espacio_deportivo == id_espacio_deportivo
         ).first()
         if not espacio:
             raise HTTPException(
@@ -257,11 +324,12 @@ def update_cancha(
                 detail="Espacio deportivo no encontrado"
             )
     
-    if cancha_data.nombre is not None and cancha_data.nombre != cancha.nombre:
-        espacio_id_verificar = cancha_data.id_espacio_deportivo if cancha_data.id_espacio_deportivo is not None else cancha.id_espacio_deportivo
+    # Verificar nombre único si se está cambiando
+    if nombre is not None and nombre != cancha.nombre:
+        espacio_id_verificar = id_espacio_deportivo if id_espacio_deportivo is not None else cancha.id_espacio_deportivo
         
         existing_cancha = db.query(Cancha).filter(
-            Cancha.nombre == cancha_data.nombre,
+            Cancha.nombre == nombre,
             Cancha.id_espacio_deportivo == espacio_id_verificar,
             Cancha.id_cancha != cancha_id
         ).first()
@@ -272,9 +340,37 @@ def update_cancha(
                 detail="Ya existe una cancha con ese nombre en este espacio deportivo"
             )
     
-    update_data = cancha_data.dict(exclude_unset=True)
-    for field, value in update_data.items():
-        setattr(cancha, field, value)
+    # Actualizar campos
+    if nombre is not None:
+        cancha.nombre = nombre
+    if tipo is not None:
+        cancha.tipo = tipo
+    if hora_apertura is not None:
+        from datetime import time
+        cancha.hora_apertura = time.fromisoformat(hora_apertura)
+    if hora_cierre is not None:
+        from datetime import time
+        cancha.hora_cierre = time.fromisoformat(hora_cierre)
+    if precio_por_hora is not None:
+        cancha.precio_por_hora = precio_por_hora
+    if id_espacio_deportivo is not None:
+        cancha.id_espacio_deportivo = id_espacio_deportivo
+    if estado is not None:
+        cancha.estado = estado
+    
+    # Procesar nueva imagen si se proporciona
+    if imagen and imagen.size > 0:
+        if imagen.size > MAX_FILE_SIZE:
+            raise HTTPException(status_code=400, detail="La imagen es demasiado grande (máximo 5MB)")
+        
+        # Eliminar imagen anterior si existe
+        if cancha.imagen:
+            old_image_path = cancha.imagen.lstrip('/')
+            if os.path.exists(old_image_path):
+                os.remove(old_image_path)
+        
+        # Guardar nueva imagen
+        cancha.imagen = save_uploaded_file_cancha(imagen)
     
     db.commit()
     db.refresh(cancha)
