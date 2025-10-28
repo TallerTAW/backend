@@ -92,6 +92,7 @@ def desactivar_usuario(usuario_id: int, db: Session = Depends(get_db)):
     
     return {"detail": "Usuario desactivado exitosamente"}
 
+# En tu router de usuarios
 @router.put("/{usuario_id}/activar")
 def activar_usuario(usuario_id: int, db: Session = Depends(get_db)):
     """Reactivar un usuario previamente desactivado"""
@@ -105,7 +106,30 @@ def activar_usuario(usuario_id: int, db: Session = Depends(get_db)):
     usuario.estado = "activo"
     db.commit()
     
-    return {"detail": "Usuario activado exitosamente"}
+    # ENVIAR EMAIL DE APROBACIÓN
+    from app.core.email_service import send_approval_email
+    email_enviado = send_approval_email(
+        to_email=usuario.email,
+        nombre=usuario.nombre,
+        apellido=usuario.apellido,
+        rol=usuario.rol
+    )
+    
+    # Crear notificación para el usuario
+    from app.models.notification import Notificacion
+    notificacion = Notificacion(
+        titulo="Cuenta Aprobada",
+        mensaje=f"Tu cuenta ha sido aprobada. Ahora tienes acceso al sistema como {usuario.rol}.",
+        tipo="usuario_aprobado",
+        usuario_id=usuario.id_usuario
+    )
+    db.add(notificacion)
+    db.commit()
+    
+    if email_enviado:
+        return {"detail": "Usuario activado exitosamente. Se ha enviado un email de confirmación al usuario."}
+    else:
+        return {"detail": "Usuario activado exitosamente. Error enviando email de confirmación."}
 
 @router.put("/{usuario_id}/cambiar-contrasenia")
 def cambiar_contrasenia(

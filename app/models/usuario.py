@@ -23,3 +23,4 @@ class Usuario(Base):
     incidentes = relationship("Incidente", back_populates="usuario")
     comentarios = relationship("Comentario", back_populates="usuario")
     cupones = relationship("Cupon", back_populates="usuario")
+    notificaciones = relationship("Notificacion", back_populates="usuario")

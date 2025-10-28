@@ -16,10 +16,16 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     usuario = db.query(Usuario).filter(Usuario.email == form_data.username).first()
     
     if not usuario or not verify_password(form_data.password, usuario.contrasenia):
-        raise AuthException("Credenciales incorrectas")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Credenciales incorrectas"
+        )
     
     if usuario.estado != "activo":
-        raise AuthException("Usuario inactivo")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Usuario inactivo. Le llegará un correo para activar su cuenta."
+        )
     
     access_token = create_access_token(
         data={"sub": usuario.email, "rol": usuario.rol, "id": usuario.id_usuario}
@@ -36,6 +42,7 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
         }
     }
 
+# En tu router de auth (donde está el /register)
 @router.post("/register")
 def register(usuario_data: Register, db: Session = Depends(get_db)):
     """
@@ -75,6 +82,7 @@ def register(usuario_data: Register, db: Session = Depends(get_db)):
         print("Creando hash de contraseña...")
         hashed_password = get_password_hash(usuario_data.contrasenia)
         
+        # Crear usuario con estado inactivo
         nuevo_usuario = Usuario(
             nombre=usuario_data.nombre,
             apellido=usuario_data.apellido,
@@ -82,15 +90,51 @@ def register(usuario_data: Register, db: Session = Depends(get_db)):
             contrasenia=hashed_password,
             telefono=usuario_data.telefono,
             rol=usuario_data.rol,
-            estado="activo"
+            estado="inactivo"
         )
         
         db.add(nuevo_usuario)
         db.commit()
         db.refresh(nuevo_usuario)
         
+        # CREAR NOTIFICACIONES PARA ADMINISTRADORES
+        from app.models.notification import Notificacion
+        
+        # Buscar administradores activos
+        administradores = db.query(Usuario).filter(
+            Usuario.rol == "admin", 
+            Usuario.estado == "activo"
+        ).all()
+        
+        for admin in administradores:
+            notificacion = Notificacion(
+                titulo="Nuevo usuario registrado",
+                mensaje=f"El usuario {nuevo_usuario.nombre} {nuevo_usuario.apellido} ({nuevo_usuario.email}) se ha registrado solicitando el rol de {nuevo_usuario.rol}. Por favor, revisa y aprueba su cuenta.",
+                tipo="nuevo_usuario",
+                usuario_id=admin.id_usuario
+            )
+            db.add(notificacion)
+        
+        db.commit()
+        
+        # ENVIAR EMAIL DE BIENVENIDA
+        from app.core.email_service import send_welcome_email
+        email_enviado = send_welcome_email(
+            to_email=nuevo_usuario.email,
+            nombre=nuevo_usuario.nombre,
+            apellido=nuevo_usuario.apellido
+        )
+        
+        if email_enviado:
+            print("✅ Email de bienvenida enviado correctamente")
+        else:
+            print("⚠️  El usuario se registró pero el email no se pudo enviar")
+        
         print(f"Usuario registrado exitosamente: {nuevo_usuario.id_usuario}")
-        return {"message": "Usuario registrado exitosamente", "id": nuevo_usuario.id_usuario}
+        return {
+            "message": "Usuario registrado exitosamente. Su cuenta está pendiente de aprobación por un administrador.", 
+            "id": nuevo_usuario.id_usuario
+        }
     
     except HTTPException:
         raise
