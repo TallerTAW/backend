@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.espacio_deportivo import EspacioDeportivo
@@ -6,6 +6,37 @@ from app.schemas.espacio_deportivo import EspacioDeportivoResponse, EspacioDepor
 from app.models.usuario import Usuario
 from app.models.administra import Administra
 from app.core.security import get_current_user
+import uuid
+import os
+import shutil
+from typing import Optional
+
+# Configuración para uploads
+UPLOAD_DIR = "static/uploads/espacios"
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
+MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
+
+# Asegurar que el directorio existe
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+def allowed_file(filename: str) -> bool:
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def save_uploaded_file(file: UploadFile) -> str:
+    """Guarda un archivo subido y retorna la ruta relativa"""
+    if not allowed_file(file.filename):
+        raise HTTPException(status_code=400, detail="Tipo de archivo no permitido")
+    
+    # Generar nombre único
+    file_extension = file.filename.rsplit('.', 1)[1].lower()
+    unique_filename = f"{uuid.uuid4().hex}.{file_extension}"
+    file_path = os.path.join(UPLOAD_DIR, unique_filename)
+    
+    # Guardar archivo
+    with open(file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    
+    return f"/{UPLOAD_DIR}/{unique_filename}"
 
 router = APIRouter()
 
@@ -25,33 +56,119 @@ def get_espacio(espacio_id: int, db: Session = Depends(get_db)):
     return espacio
 
 @router.post("/", response_model=EspacioDeportivoResponse)
-def create_espacio(espacio_data: EspacioDeportivoCreate, db: Session = Depends(get_db)):
-    existing_espacio = db.query(EspacioDeportivo).filter(EspacioDeportivo.nombre == espacio_data.nombre).first()
-    if existing_espacio:
-        raise HTTPException(status_code=400, detail="Ya existe un espacio deportivo con ese nombre")
+async def create_espacio(
+    nombre: str = Form(...),
+    ubicacion: str = Form(...),
+    capacidad: int = Form(...),
+    descripcion: Optional[str] = Form(None),
+    gestor_id: Optional[int] = Form(None),  # NUEVO: ID del gestor a asignar
+    imagen: Optional[UploadFile] = File(None),
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user)
+):
+    """Crear espacio deportivo con imagen - SOLO ADMIN"""
     
-    nuevo_espacio = EspacioDeportivo(**espacio_data.dict())
-    db.add(nuevo_espacio)
-    db.commit()
-    db.refresh(nuevo_espacio)
-    return nuevo_espacio
+    if current_user.rol != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo los administradores pueden crear espacios deportivos"
+        )
+    
+    try:
+        # Verificar si ya existe un espacio con ese nombre
+        existing_espacio = db.query(EspacioDeportivo).filter(EspacioDeportivo.nombre == nombre).first()
+        if existing_espacio:
+            raise HTTPException(status_code=400, detail="Ya existe un espacio deportivo con ese nombre")
+        
+        # Procesar imagen si se proporciona
+        imagen_path = None
+        if imagen and imagen.size > 0:
+            if imagen.size > MAX_FILE_SIZE:
+                raise HTTPException(status_code=400, detail="La imagen es demasiado grande (máximo 5MB)")
+            imagen_path = save_uploaded_file(imagen)
+        
+        # Crear el espacio
+        nuevo_espacio = EspacioDeportivo(
+            nombre=nombre,
+            ubicacion=ubicacion,
+            capacidad=capacidad,
+            descripcion=descripcion,
+            imagen=imagen_path
+        )
+        
+        db.add(nuevo_espacio)
+        db.commit()
+        db.refresh(nuevo_espacio)
+        
+        # ASIGNAR GESTOR SI SE PROPORCIONÓ
+        if gestor_id:
+            gestor = db.query(Usuario).filter(
+                Usuario.id_usuario == gestor_id,
+                Usuario.rol == "gestor",
+                Usuario.estado == "activo"
+            ).first()
+            
+            if gestor:
+                nueva_asignacion = Administra(
+                    id_espacio_deportivo=nuevo_espacio.id_espacio_deportivo,
+                    id_usuario=gestor_id
+                )
+                db.add(nueva_asignacion)
+                db.commit()
+        
+        return nuevo_espacio
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
 
 @router.put("/{espacio_id}", response_model=EspacioDeportivoResponse)
-def update_espacio(espacio_id: int, espacio_data: EspacioDeportivoUpdate, db: Session = Depends(get_db)):
+async def update_espacio(
+    espacio_id: int,
+    nombre: Optional[str] = Form(None),
+    ubicacion: Optional[str] = Form(None),
+    capacidad: Optional[int] = Form(None),
+    descripcion: Optional[str] = Form(None),
+    imagen: Optional[UploadFile] = File(None),
+    db: Session = Depends(get_db)
+):
+    """Actualizar espacio deportivo con imagen"""
     espacio = db.query(EspacioDeportivo).filter(EspacioDeportivo.id_espacio_deportivo == espacio_id).first()
     if not espacio:
         raise HTTPException(status_code=404, detail="Espacio deportivo no encontrado")
     
-    if espacio_data.nombre and espacio_data.nombre != espacio.nombre:
+    # Verificar nombre único si se está cambiando
+    if nombre and nombre != espacio.nombre:
         existing_espacio = db.query(EspacioDeportivo).filter(
-            EspacioDeportivo.nombre == espacio_data.nombre,
+            EspacioDeportivo.nombre == nombre,
             EspacioDeportivo.id_espacio_deportivo != espacio_id
         ).first()
         if existing_espacio:
             raise HTTPException(status_code=400, detail="Ya existe un espacio deportivo con ese nombre")
     
-    for field, value in espacio_data.dict(exclude_unset=True).items():
-        setattr(espacio, field, value)
+    # Actualizar campos
+    if nombre is not None:
+        espacio.nombre = nombre
+    if ubicacion is not None:
+        espacio.ubicacion = ubicacion
+    if capacidad is not None:
+        espacio.capacidad = capacidad
+    if descripcion is not None:
+        espacio.descripcion = descripcion
+    
+    # Procesar nueva imagen si se proporciona
+    if imagen and imagen.size > 0:
+        if imagen.size > MAX_FILE_SIZE:
+            raise HTTPException(status_code=400, detail="La imagen es demasiado grande (máximo 5MB)")
+        
+        # Eliminar imagen anterior si existe
+        if espacio.imagen:
+            old_image_path = espacio.imagen.lstrip('/')
+            if os.path.exists(old_image_path):
+                os.remove(old_image_path)
+        
+        # Guardar nueva imagen
+        espacio.imagen = save_uploaded_file(imagen)
     
     db.commit()
     db.refresh(espacio)
@@ -284,3 +401,130 @@ def get_espacio_public(espacio_id: int, db: Session = Depends(get_db)):
     if not espacio:
         raise HTTPException(status_code=404, detail="Espacio deportivo no encontrado")
     return espacio
+
+@router.get("/gestores/disponibles")
+def get_gestores_disponibles(
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user)
+):
+    """Obtener lista de gestores disponibles para asignar espacios"""
+    
+    if current_user.rol != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo los administradores pueden ver los gestores"
+        )
+    
+    # Obtener todos los usuarios con rol "gestor" y estado "activo"
+    gestores = db.query(Usuario).filter(
+        Usuario.rol == "gestor",
+        Usuario.estado == "activo"
+    ).all()
+    
+    return [
+        {
+            "id_usuario": gestor.id_usuario,
+            "nombre": gestor.nombre,
+            "apellido": gestor.apellido,
+            "email": gestor.email,
+            "telefono": gestor.telefono
+        }
+        for gestor in gestores
+    ]
+
+@router.post("/{espacio_id}/asignar-gestor/{gestor_id}")
+def asignar_gestor_espacio(
+    espacio_id: int,
+    gestor_id: int,
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user)
+):
+    """Asignar un gestor a un espacio deportivo"""
+    
+    if current_user.rol != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo los administradores pueden asignar gestores"
+        )
+    
+    # Verificar que el espacio existe
+    espacio = db.query(EspacioDeportivo).filter(EspacioDeportivo.id_espacio_deportivo == espacio_id).first()
+    if not espacio:
+        raise HTTPException(status_code=404, detail="Espacio deportivo no encontrado")
+    
+    # Verificar que el usuario es un gestor
+    gestor = db.query(Usuario).filter(
+        Usuario.id_usuario == gestor_id,
+        Usuario.rol == "gestor",
+        Usuario.estado == "activo"
+    ).first()
+    
+    if not gestor:
+        raise HTTPException(status_code=404, detail="Gestor no encontrado o no está activo")
+    
+    # Verificar si ya existe la asignación
+    existing_asignacion = db.query(Administra).filter(
+        Administra.id_espacio_deportivo == espacio_id,
+        Administra.id_usuario == gestor_id
+    ).first()
+    
+    if existing_asignacion:
+        raise HTTPException(
+            status_code=400,
+            detail="Este gestor ya está asignado a este espacio"
+        )
+    
+    # Crear la asignación
+    nueva_asignacion = Administra(
+        id_espacio_deportivo=espacio_id,
+        id_usuario=gestor_id
+    )
+    
+    db.add(nueva_asignacion)
+    db.commit()
+    
+    return {
+        "detail": f"Gestor {gestor.nombre} {gestor.apellido} asignado exitosamente al espacio {espacio.nombre}",
+        "asignacion": {
+            "id_espacio": espacio_id,
+            "id_gestor": gestor_id,
+            "nombre_espacio": espacio.nombre,
+            "nombre_gestor": f"{gestor.nombre} {gestor.apellido}"
+        }
+    }
+
+@router.get("/{espacio_id}/gestor-asignado")
+def get_gestor_asignado(
+    espacio_id: int,
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user)
+):
+    """Obtener el gestor asignado a un espacio deportivo"""
+    if current_user.rol != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo los administradores pueden ver esta información"
+        )
+    
+    # Buscar la asignación en la tabla administra
+    asignacion = db.query(Administra).filter(
+        Administra.id_espacio_deportivo == espacio_id
+    ).first()
+    
+    if not asignacion:
+        return {"gestor_asignado": None}
+    
+    # Obtener información del gestor
+    gestor = db.query(Usuario).filter(Usuario.id_usuario == asignacion.id_usuario).first()
+    
+    if gestor:
+        return {
+            "gestor_asignado": {
+                "id_usuario": gestor.id_usuario,
+                "nombre": gestor.nombre,
+                "apellido": gestor.apellido,
+                "email": gestor.email
+            }
+        }
+    else:
+        return {"gestor_asignado": None}
