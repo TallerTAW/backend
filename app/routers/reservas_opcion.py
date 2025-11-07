@@ -334,3 +334,64 @@ def get_reservas_proximas(dias: int = 7, db: Session = Depends(get_db)):
     ).order_by(Reserva.fecha_reserva, Reserva.hora_inicio).all()
     
     return reservas
+# 🆕 NUEVOS ENDPOINTS PARA HORARIOS DISPONIBLES - Agrega esto al final de reservas_opcion.py
+@router.get("/cancha/{cancha_id}/horarios-disponibles")
+def get_horarios_disponibles(
+    cancha_id: int,
+    fecha: date,
+    db: Session = Depends(get_db)
+):
+    """Obtener horarios disponibles usando la función PostgreSQL"""
+    try:
+        # Ejecutar la función de PostgreSQL que ya tienes
+        result = db.execute(
+            text("SELECT * FROM listar_horarios_disponibles(:p_id_cancha, :p_fecha)"),
+            {"p_id_cancha": cancha_id, "p_fecha": fecha}
+        ).fetchall()
+        
+        # Convertir resultado a lista de diccionarios
+        horarios = []
+        for row in result:
+            horarios.append({
+                "hora_inicio": str(row[0]),
+                "hora_fin": str(row[1]),
+                "disponible": row[2],
+                "precio_hora": float(row[3]) if row[3] else 0.0,
+                "mensaje": row[4]
+            })
+        
+        return horarios
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Error al obtener horarios disponibles: {str(e)}"
+        )
+
+@router.get("/verificar-disponibilidad")
+def verificar_disponibilidad(
+    cancha_id: int,
+    fecha: date,
+    hora_inicio: str,
+    hora_fin: str,
+    db: Session = Depends(get_db)
+):
+    """Verificar disponibilidad usando la función PostgreSQL"""
+    try:
+        result = db.execute(
+            text("SELECT verificar_disponibilidad(:p_id_cancha, :p_fecha, :p_hora_inicio, :p_hora_fin)"),
+            {
+                "p_id_cancha": cancha_id,
+                "p_fecha": fecha,
+                "p_hora_inicio": hora_inicio,
+                "p_hora_fin": hora_fin
+            }
+        ).scalar()
+        
+        return {"disponible": result}
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Error al verificar disponibilidad: {str(e)}"
+        )
