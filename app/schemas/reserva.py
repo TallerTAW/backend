@@ -1,3 +1,6 @@
+# 🎯 PROPÓSITO: Mantener codigo_reserva como campo requerido
+# 💡 CAMBIO: Schema se mantiene igual - NO cambiar a Optional
+
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime, date, time
@@ -24,7 +27,7 @@ class ReservaResponse(ReservaBase):
     id_reserva: int
     estado: str
     costo_total: float
-    codigo_reserva: str
+    codigo_reserva: str  # ✅ MANTENER COMO REQUERIDO - NO CAMBIAR
     qr_code: Optional[str] = None
     fecha_creacion: datetime
     fecha_actualizacion: Optional[datetime] = None
