@@ -11,6 +11,7 @@ from app.database import get_db
 from app.models.cupon import Cupon
 from app.models.reserva import Reserva
 from app.models.usuario import Usuario
+from app.core.security import get_current_user
 from app.schemas.cupon import (
     CuponResponse, CuponCreate, CuponUpdate, 
     CuponAplicar, CuponGenerarLote
@@ -59,6 +60,24 @@ def get_cupon_por_codigo(codigo: str, db: Session = Depends(get_db)):
     if not cupon:
         raise HTTPException(status_code=404, detail="Cupón no encontrado")
     return cupon
+
+@router.get("/mis-cupones/", response_model=List[CuponResponse])
+def get_mis_cupones(
+    current_user: Usuario = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Obtener cupones del usuario actual"""
+    return db.query(Cupon).filter(
+        or_(
+            Cupon.id_usuario == current_user.id_usuario,
+            Cupon.id_usuario.is_(None)  # Cupones generales
+        ),
+        Cupon.estado == "activo",
+        or_(
+            Cupon.fecha_expiracion.is_(None),
+            Cupon.fecha_expiracion >= date.today()
+        )
+    ).all()
 
 @router.post("/", response_model=CuponResponse)
 def create_cupon(cupon_data: CuponCreate, db: Session = Depends(get_db)):

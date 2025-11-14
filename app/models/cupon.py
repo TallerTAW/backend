@@ -14,6 +14,7 @@ class Cupon(Base):
     estado = Column(String(20), default="activo")
     id_usuario = Column(Integer, ForeignKey("usuario.id_usuario", ondelete="CASCADE"))
     id_reserva = Column(Integer, ForeignKey("reserva.id_reserva", ondelete="SET NULL"))
+    fecha_creacion = Column(DateTime, default=func.now())
     
     # Relaciones
     usuario = relationship("Usuario", back_populates="cupones")
