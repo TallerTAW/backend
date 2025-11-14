@@ -7,6 +7,8 @@ class EspacioDeportivoBase(BaseModel):
    ubicacion: Optional[str] = Field(None, max_length=150)
    capacidad: Optional[int] = Field(None, ge=1)
    estado: Optional[str] = Field("activo", pattern="^(activo|inactivo)$")
+   latitud: Optional[float] = Field(None, ge=-90, le=90, description="Latitud geográfica")
+   longitud: Optional[float] = Field(None, ge=-180, le=180, description="Longitud geográfica")
    descripcion: Optional[str] = None
    imagen: Optional[str] = Field(None, max_length=255)
 
@@ -19,6 +21,8 @@ class EspacioDeportivoUpdate(BaseModel):
     capacidad: Optional[int] = Field(None, ge=1)
     estado: Optional[str] = Field(None, pattern="^(activo|inactivo)$")
     descripcion: Optional[str] = None
+    latitud: Optional[float] = Field(None, ge=-90, le=90, description="Latitud geográfica")
+    longitud: Optional[float] = Field(None, ge=-180, le=180, description="Longitud geográfica")
     imagen: Optional[str] = Field(None, max_length=255)
 
 class EspacioDeportivoResponse(EspacioDeportivoBase):
