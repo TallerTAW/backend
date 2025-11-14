@@ -10,6 +10,8 @@ import uuid
 import os
 import shutil
 from typing import Optional
+from math import radians, cos, sin, asin, sqrt
+from sqlalchemy import text
 
 # Configuración para uploads
 UPLOAD_DIR = "static/uploads/espacios"
@@ -62,6 +64,8 @@ async def create_espacio(
     capacidad: int = Form(...),
     descripcion: Optional[str] = Form(None),
     gestor_id: Optional[int] = Form(None),  # NUEVO: ID del gestor a asignar
+    latitud: float = Form(None),
+    longitud: float = Form(None),
     imagen: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
     current_user: Usuario = Depends(get_current_user)
@@ -93,6 +97,8 @@ async def create_espacio(
             ubicacion=ubicacion,
             capacidad=capacidad,
             descripcion=descripcion,
+            latitud=latitud,
+            longitud=longitud,
             imagen=imagen_path
         )
         
@@ -203,6 +209,36 @@ def activar_espacio(espacio_id: int, db: Session = Depends(get_db)):
     db.commit()
     
     return {"detail": "Espacio deportivo activado exitosamente"}
+
+
+
+@router.get("/nearby")
+def get_espacios_cercanos(lat: float, lon: float, radius_km: float = 5.0, db: Session = Depends(get_db)):
+    """
+    Retorna espacios dentro de radius_km kilómetros del punto (lat, lon).
+    """
+    # Haversine en SQL (PostgreSQL). usa COALESCE para excluir nulos
+    sql = text("""
+      SELECT *,
+      (6371 * acos(
+        cos(radians(:lat)) * cos(radians(latitud)) * cos(radians(longitud) - radians(:lon))
+        + sin(radians(:lat)) * sin(radians(latitud))
+      )) AS distance_km
+      FROM espacio_deportivo
+      WHERE latitud IS NOT NULL AND longitud IS NOT NULL
+      HAVING (6371 * acos(
+        cos(radians(:lat)) * cos(radians(latitud)) * cos(radians(longitud) - radians(:lon))
+        + sin(radians(:lat)) * sin(radians(latitud))
+      )) <= :radius
+      ORDER BY distance_km ASC
+      LIMIT 100;
+    """)
+    result = db.execute(sql, {"lat": lat, "lon": lon, "radius": radius_km})
+    rows = [dict(r) for r in result]
+    return rows
+
+
+
 
 @router.get("/gestor/mis-espacios", response_model=list[EspacioDeportivoResponse])
 def get_espacios_gestor(
