@@ -6,6 +6,7 @@ from app.database import get_db
 from app.models.cancha import Cancha
 from app.models.espacio_deportivo import EspacioDeportivo
 from app.models.administra import Administra
+from app.models.cancha_disciplina import CanchaDisciplina  # ✅ Importar el modelo de relación
 from app.schemas.cancha import CanchaResponse, CanchaCreate, CanchaUpdate, DisponibilidadResponse, HorarioDisponible
 from app.core.security import get_current_user
 from app.models.usuario import Usuario
@@ -107,6 +108,49 @@ def get_disponibilidad_cancha_public(
 ):
     """Obtener horarios disponibles de una cancha (público)"""
     return get_disponibilidad_cancha(cancha_id, fecha, db)
+
+# ✅ ENDPOINT CORREGIDO: Filtrar canchas por espacio y disciplina usando la relación many-to-many
+@router.get("/public/espacio/{espacio_id}/disciplina/{disciplina_id}", response_model=list[CanchaResponse])
+def get_canchas_por_espacio_y_disciplina_public(
+    espacio_id: int, 
+    disciplina_id: int,
+    db: Session = Depends(get_db)
+):
+    """Obtener canchas disponibles por espacio y disciplina específica - PÚBLICO"""
+    try:
+        # Verificar que el espacio existe
+        espacio = db.query(EspacioDeportivo).filter(
+            EspacioDeportivo.id_espacio_deportivo == espacio_id
+        ).first()
+        
+        if not espacio:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Espacio deportivo no encontrado"
+            )
+        
+        # ✅ CORRECCIÓN: Usar join con la tabla cancha_disciplina para filtrar por disciplina
+        canchas = db.query(Cancha).join(
+            CanchaDisciplina, 
+            Cancha.id_cancha == CanchaDisciplina.id_cancha
+        ).filter(
+            Cancha.id_espacio_deportivo == espacio_id,
+            CanchaDisciplina.id_disciplina == disciplina_id,  # ✅ Filtrar por disciplina a través de la relación
+            Cancha.estado == "disponible"
+        ).all()
+        
+        return canchas
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error al obtener canchas por espacio y disciplina: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al obtener canchas: {str(e)}"
+        )
 
 def obtener_canchas_por_rol(current_user: Usuario, db: Session):
     """Obtener canchas según el rol del usuario"""
