@@ -1,8 +1,9 @@
+# En main.py - CAMBIAR LOS PREFIJOS
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import (
     auth, notifications, reservas_opcion, usuarios, espacios, canchas, disciplinas, cupones,
-    pagos, reportes, control_acceso, content, incidentes, comentarios, notifications
+    pagos, reportes, control_acceso, content, incidentes, comentarios, notifications, reservas  # ✅ AGREGAR reservas
 )
 from app.database import engine, Base
 from fastapi.staticfiles import StaticFiles
@@ -16,17 +17,17 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Configuración CORS más específica
+# Configuración CORS (igual que antes)
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
-    "http://localhost:3000",
+    "http://localhost:3000", 
     "http://127.0.0.1:3000",
 ]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,  # Especifica los orígenes en lugar de "*"
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=[
@@ -41,14 +42,18 @@ app.add_middleware(
     max_age=600,
 )
 
-# Routers
+# Routers - CON PREFIJOS DIFERENTES
 app.include_router(auth.router, prefix="/auth", tags=["Autenticación"])
 app.include_router(usuarios.router, prefix="/usuarios", tags=["Usuarios"])
 app.include_router(espacios.router, prefix="/espacios", tags=["Espacios Deportivos"])
 app.include_router(canchas.router, prefix="/canchas", tags=["Canchas"])
 app.include_router(cupones.router, prefix="/cupones", tags=["Cupones"])
 app.include_router(disciplinas.router, prefix="/disciplinas", tags=["Disciplinas"])
-app.include_router(reservas_opcion.router, prefix="/reservas", tags=["Reservas"])
+
+# ✅ RESERVAS CON PREFIJOS DIFERENTES
+app.include_router(reservas.router, prefix="/reservas", tags=["Reservas Básicas"])
+app.include_router(reservas_opcion.router, prefix="/reservas-completas", tags=["Reservas Completas"])
+
 app.include_router(pagos.router, prefix="/pagos", tags=["Pagos"])
 app.include_router(reportes.router, prefix="/reportes", tags=["Reportes"])
 app.include_router(control_acceso.router, prefix="/control-acceso", tags=["Control de Acceso"])
