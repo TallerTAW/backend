@@ -16,6 +16,7 @@ from app.models.cancha import Cancha
 from app.models.usuario import Usuario
 from app.models.disciplina import Disciplina
 from app.schemas.reserva import ReservaResponse, ReservaCreate, ReservaUpdate
+from app.models.administra import Administra
 from app.core.security import get_password_hash
 import random
 import string
@@ -359,3 +360,175 @@ def get_reserva_por_codigo(codigo_reserva: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Reserva no encontrada")
     
     return reserva
+
+@router.patch("/{reserva_id}", response_model=ReservaResponse)
+def update_reserva(reserva_id: int, reserva_data: ReservaUpdate, db: Session = Depends(get_db)):
+    """Actualizar reserva (principalmente estado) - NUEVO ENDPOINT PATCH"""
+    print(f"🔧 [BACKEND] Actualizando reserva {reserva_id} con datos: {reserva_data.dict()}")
+    
+    reserva = db.query(Reserva).filter(Reserva.id_reserva == reserva_id).first()
+    if not reserva:
+        print(f"❌ [BACKEND] Reserva {reserva_id} no encontrada")
+        raise HTTPException(status_code=404, detail="Reserva no encontrada")
+
+    # Log del estado actual
+    print(f"📋 [BACKEND] Estado actual de reserva {reserva_id}: {reserva.estado}")
+    
+    # Actualizar campos permitidos
+    campos_permitidos = ['estado', 'material_prestado', 'cantidad_asistentes']
+    campos_actualizados = []
+    
+    for campo, valor in reserva_data.dict(exclude_unset=True).items():
+        if campo in campos_permitidos and valor is not None:
+            setattr(reserva, campo, valor)
+            campos_actualizados.append(campo)
+            print(f"✅ [BACKEND] Campo actualizado: {campo} = {valor}")
+
+    if not campos_actualizados:
+        print("⚠️ [BACKEND] No se actualizaron campos (ningún cambio o campos no permitidos)")
+    
+    try:
+        db.commit()
+        db.refresh(reserva)
+        print(f"🎉 [BACKEND] Reserva {reserva_id} actualizada exitosamente. Campos: {campos_actualizados}")
+        
+        return reserva
+        
+    except Exception as e:
+        db.rollback()
+        print(f"❌ [BACKEND] Error al actualizar reserva {reserva_id}: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al actualizar reserva: {str(e)}"
+        )
+    
+@router.delete("/{reserva_id}")
+def cancelar_reserva(reserva_id: int, motivo: str = None, db: Session = Depends(get_db)):
+    """Cancelar reserva (borrado lógico cambiando estado) - NUEVO ENDPOINT DELETE"""
+    print(f"🗑️ [BACKEND] Cancelando reserva {reserva_id}. Motivo: {motivo}")
+    
+    reserva = db.query(Reserva).filter(Reserva.id_reserva == reserva_id).first()
+    if not reserva:
+        print(f"❌ [BACKEND] Reserva {reserva_id} no encontrada")
+        raise HTTPException(status_code=404, detail="Reserva no encontrada")
+    
+    if reserva.estado == 'cancelada':
+        print(f"⚠️ [BACKEND] Reserva {reserva_id} ya está cancelada")
+        raise HTTPException(status_code=400, detail="La reserva ya está cancelada")
+    
+    # Guardar el estado anterior para logging
+    estado_anterior = reserva.estado
+    
+    # Cambiar estado a cancelada
+    reserva.estado = 'cancelada'
+    
+    # Aquí podrías crear un registro en la tabla cancelacion si lo necesitas
+    try:
+        from app.models.cancelacion import Cancelacion
+        cancelacion = Cancelacion(
+            motivo=motivo or "Cancelación por administrador",
+            id_reserva=reserva_id,
+            id_usuario=reserva.id_usuario  # o el usuario que cancela
+        )
+        db.add(cancelacion)
+        print(f"✅ [BACKEND] Registro de cancelación creado para reserva {reserva_id}")
+    except Exception as e:
+        print(f"⚠️ [BACKEND] No se pudo crear registro de cancelación: {str(e)}")
+        # No fallar si no se puede crear el registro de cancelación
+    
+    try:
+        db.commit()
+        print(f"🎉 [BACKEND] Reserva {reserva_id} cancelada exitosamente. Estado anterior: {estado_anterior}")
+        
+        return {
+            "detail": "Reserva cancelada exitosamente", 
+            "motivo": motivo,
+            "reserva_id": reserva_id,
+            "estado_anterior": estado_anterior
+        }
+        
+    except Exception as e:
+        db.rollback()
+        print(f"❌ [BACKEND] Error al cancelar reserva {reserva_id}: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al cancelar reserva: {str(e)}"
+        )
+    
+# En app/routers/reservas_opcion.py - Endpoint corregido
+@router.get("/gestor/mis-reservas", response_model=List[ReservaResponse])
+def get_reservas_gestor(
+    gestor_id: int,
+    skip: int = 0,
+    limit: int = 100,
+    estado: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Obtener reservas solo para los espacios deportivos del gestor"""
+    print(f"👨‍💼 [BACKEND] Obteniendo reservas para gestor {gestor_id}")
+    
+    espacios_gestor = db.query(Administra).filter(
+        Administra.id_usuario == gestor_id
+    ).all()
+    
+    espacios_ids = [espacio.id_espacio_deportivo for espacio in espacios_gestor]
+    
+    if not espacios_ids:
+        print(f"ℹ️ [BACKEND] Gestor {gestor_id} no tiene espacios asignados")
+        return []
+    
+    print(f"🏟️ [BACKEND] Espacios del gestor: {espacios_ids}")
+    
+    # 2. Obtener las canchas que pertenecen a esos espacios
+    canchas_espacios = db.query(Cancha).filter(
+        Cancha.id_espacio_deportivo.in_(espacios_ids)
+    ).all()
+    
+    canchas_ids = [cancha.id_cancha for cancha in canchas_espacios]
+    
+    if not canchas_ids:
+        print(f"ℹ️ [BACKEND] No hay canchas en los espacios del gestor {gestor_id}")
+        return []
+    
+    print(f"⚽ [BACKEND] Canchas del gestor: {canchas_ids}")
+    
+    # 3. Query para reservas de las canchas del gestor
+    query = db.query(Reserva).filter(Reserva.id_cancha.in_(canchas_ids))
+    
+    if estado:
+        query = query.filter(Reserva.estado == estado)
+    
+    reservas = query.order_by(Reserva.fecha_reserva.desc()).offset(skip).limit(limit).all()
+    
+    print(f"✅ [BACKEND] Encontradas {len(reservas)} reservas para gestor {gestor_id}")
+    
+    return reservas
+
+@router.get("/usuario/{usuario_id}", response_model=List[ReservaResponse])
+def get_reservas_usuario(usuario_id: int, db: Session = Depends(get_db)):
+    """Obtener reservas de un usuario específico"""
+    print(f"👤 [BACKEND] Obteniendo reservas para usuario {usuario_id}")
+    
+    # Verificar que el usuario existe
+    usuario = db.query(Usuario).filter(Usuario.id_usuario == usuario_id).first()
+    if not usuario:
+        print(f"❌ [BACKEND] Usuario {usuario_id} no encontrado")
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    
+    # Obtener reservas del usuario
+    reservas = db.query(Reserva).filter(
+        Reserva.id_usuario == usuario_id
+    ).order_by(
+        Reserva.fecha_reserva.desc(),
+        Reserva.hora_inicio.desc()
+    ).all()
+    
+    print(f"✅ [BACKEND] Encontradas {len(reservas)} reservas para usuario {usuario_id}")
+    
+    # ✅ VALIDACIÓN: Generar códigos temporales si son NULL
+    for reserva in reservas:
+        if not reserva.codigo_reserva:
+            reserva.codigo_reserva = f"TEMP-{reserva.id_reserva}"
+            print(f"⚠️  ADVERTENCIA: Reserva {reserva.id_reserva} sin código, usando temporal")
+    
+    return reservas
