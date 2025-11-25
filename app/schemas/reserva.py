@@ -34,6 +34,9 @@ class ReservaUpdate(BaseModel):
     id_disciplina: Optional[int] = None
     id_cancha: Optional[int] = None
 
+    class Config:
+        from_attributes = True
+
 class ReservaResponse(ReservaBase):
     """
     🎯 ESQUEMA DE RESPUESTA PARA RESERVA
@@ -42,6 +45,8 @@ class ReservaResponse(ReservaBase):
     codigo_reserva: str
     estado: str
     costo_total: Decimal
+    codigo_reserva: Optional[str] = None  # ✅ CAMBIAR A OPCIONAL TEMPORALMENTE
+    qr_code: Optional[str] = None
     fecha_creacion: datetime
     
     class Config:
