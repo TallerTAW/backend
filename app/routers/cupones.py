@@ -1,3 +1,7 @@
+# 📍 ARCHIVO: app/routers/cupones.py
+# 🎯 PROPÓSITO: Endpoint completo de cupones
+# 💡 CAMBIOS: Mejorar debugging y validaciones
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_
@@ -180,7 +184,12 @@ def update_cupon(cupon_id: int, cupon_data: CuponUpdate, db: Session = Depends(g
 
 @router.post("/aplicar")
 def aplicar_cupon(aplicar_data: CuponAplicar, db: Session = Depends(get_db)):
-    """Aplicar un cupón a una reserva"""
+    """
+    🎯 APLICAR CUPÓN A RESERVA EXISTENTE
+    💡 NOTA: Esta función ahora se usa principalmente para aplicar cupones a reservas ya creadas
+    """
+    print(f"🎫 [CUPONES] Aplicando cupón: {aplicar_data.codigo_cupon} a reserva: {aplicar_data.id_reserva}")
+    
     # Buscar el cupón
     cupon = db.query(Cupon).filter(Cupon.codigo == aplicar_data.codigo_cupon).first()
     if not cupon:
@@ -190,6 +199,8 @@ def aplicar_cupon(aplicar_data: CuponAplicar, db: Session = Depends(get_db)):
     reserva = db.query(Reserva).filter(Reserva.id_reserva == aplicar_data.id_reserva).first()
     if not reserva:
         raise HTTPException(status_code=404, detail="Reserva no encontrada")
+    
+    print(f"🔍 [CUPONES] Cupón encontrado: {cupon.codigo}, Reserva encontrada: {reserva.id_reserva}")
     
     # Validaciones del cupón
     if cupon.estado != "activo":
@@ -204,17 +215,25 @@ def aplicar_cupon(aplicar_data: CuponAplicar, db: Session = Depends(get_db)):
     if cupon.id_reserva:
         raise HTTPException(status_code=400, detail="Este cupón ya ha sido utilizado")
     
+    # Guardar costo original para referencia
+    costo_original = reserva.costo_total
+    print(f"💰 [CUPONES] Costo original de reserva: ${costo_original}")
+    
     # Aplicar descuento a la reserva
     if cupon.tipo == "porcentaje":
         descuento = (reserva.costo_total * cupon.monto_descuento) / 100
+        print(f"🎫 [CUPONES] Descuento porcentual: {cupon.monto_descuento}% = ${descuento}")
     else:  # fijo
         descuento = cupon.monto_descuento
+        print(f"🎫 [CUPONES] Descuento fijo: ${descuento}")
     
     # Asegurar que el descuento no sea mayor al costo total
     if descuento > reserva.costo_total:
         descuento = reserva.costo_total
+        print(f"⚠️ [CUPONES] Descuento ajustado a costo total: ${descuento}")
     
     nuevo_costo = reserva.costo_total - descuento
+    print(f"💰 [CUPONES] Nuevo costo después de descuento: ${nuevo_costo}")
     
     # Actualizar reserva y cupón
     reserva.costo_total = nuevo_costo
@@ -223,11 +242,15 @@ def aplicar_cupon(aplicar_data: CuponAplicar, db: Session = Depends(get_db)):
     
     db.commit()
     
+    print(f"✅ [CUPONES] Cupón aplicado exitosamente a reserva {reserva.id_reserva}")
+    
     return {
         "message": "Cupón aplicado exitosamente",
         "descuento_aplicado": float(descuento),
         "nuevo_costo": float(nuevo_costo),
-        "reserva_id": reserva.id_reserva
+        "costo_original": float(costo_original),
+        "reserva_id": reserva.id_reserva,
+        "cupon_codigo": cupon.codigo
     }
 
 @router.put("/{cupon_id}/activar")

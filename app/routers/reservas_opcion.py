@@ -1,9 +1,10 @@
 # 📍 ARCHIVO: app/routers/reservas_opcion.py
-# 🎯 PROPÓSITO: Endpoint completo de reservas con debugging mejorado
-# 💡 CAMBIOS: 
-#   - Debugging extensivo en el endpoint de horarios
-#   - Validaciones mejoradas
-#   - Respuestas más informativas
+# 🎯 PROPÓSITO: Endpoint completo de reservas con integración de cupones
+# 💡 CAMBIOS PRINCIPALES: 
+#   - Integración completa del sistema de cupones
+#   - Aplicación de descuento durante la creación de reserva
+#   - Debugging mejorado para cupones
+#   - ✅ CORRECCIÓN: Conversión de decimal.Decimal a float en cálculo de descuentos
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -15,13 +16,14 @@ from app.models.reserva import Reserva
 from app.models.cancha import Cancha
 from app.models.usuario import Usuario
 from app.models.disciplina import Disciplina
+from app.models.cupon import Cupon  # ✅ NUEVA IMPORTACIÓN
 from app.schemas.reserva import ReservaResponse, ReservaCreate, ReservaUpdate
+from app.schemas.cupon import CuponAplicar  # ✅ NUEVA IMPORTACIÓN
 from app.core.security import get_password_hash
 import random
 import string
 from app.schemas.cancha import VerificarDisponibilidadRequest
 from sqlalchemy import text
-
 
 router = APIRouter()
 
@@ -126,7 +128,11 @@ def get_reserva(reserva_id: int, db: Session = Depends(get_db)):
 
 @router.post("/", response_model=ReservaResponse)
 def create_reserva(reserva_data: ReservaCreate, db: Session = Depends(get_db)):
-    """Crear una nueva reserva con validación de disponibilidad usando función PostgreSQL"""
+    """
+    🎯 CREAR RESERVA CON SOPORTE PARA CUPONES - VERSIÓN CORREGIDA
+    💡 CAMBIO PRINCIPAL: Integración completa del sistema de cupones durante la creación
+    💡 CORRECCIÓN CRÍTICA: Conversión de decimal.Decimal a float en cálculo de descuentos
+    """
     print(f"🎯 [BACKEND] Iniciando creación de reserva: {reserva_data.dict()}")
     
     # Verificar que la cancha existe
@@ -185,10 +191,12 @@ def create_reserva(reserva_data: ReservaCreate, db: Session = Depends(get_db)):
     if reserva_data.fecha_reserva < date.today():
         raise HTTPException(status_code=400, detail="No se pueden hacer reservas en fechas pasadas")
     
-    # Calcular costo total
+    # Calcular costo total INICIAL (sin cupón)
     costo_total = calcular_costo_total(
         reserva_data.hora_inicio, reserva_data.hora_fin, float(cancha.precio_por_hora)
     )
+    
+    costo_inicial = costo_total  # Guardar para referencia
     
     # ✅ CORRECCIÓN IMPORTANTE: Generar código único de reserva CON VALIDACIÓN MEJORADA
     codigo_reserva = generar_codigo_unico_reserva(db)
@@ -198,13 +206,18 @@ def create_reserva(reserva_data: ReservaCreate, db: Session = Depends(get_db)):
         codigo_reserva = f"RES-{int(datetime.now().timestamp())}"
     
     print(f"✅ [BACKEND] Generado código reserva: {codigo_reserva}")
+    print(f"💰 [BACKEND] Costo inicial calculado: ${costo_total}")
     
-    # Crear la reserva
+    # ✅ EXCLUIR CAMPO DE CUPÓN AL CREAR LA RESERVA INICIAL
+    reserva_dict = reserva_data.dict()
+    codigo_cupon = reserva_dict.pop('codigo_cupon', None)  # Extraer y remover código de cupón
+    
+    # Crear la reserva con costo inicial
     nueva_reserva = Reserva(
-        **reserva_data.dict(),
+        **reserva_dict,
         costo_total=costo_total,
-        codigo_reserva=codigo_reserva,  # ✅ GARANTIZADO que tiene valor
-        estado="pendiente"  # Estado inicial
+        codigo_reserva=codigo_reserva,
+        estado="pendiente"
     )
     
     try:
@@ -218,9 +231,72 @@ def create_reserva(reserva_data: ReservaCreate, db: Session = Depends(get_db)):
             
         print(f"✅ [BACKEND] Reserva {nueva_reserva.id_reserva} creada exitosamente con código: {nueva_reserva.codigo_reserva}")
         
+        # ✅ APLICAR CUPÓN SI SE PROPORCIONA - CORRECCIÓN PRINCIPAL
+        cupon_aplicado = False
+        descuento_aplicado = 0.0
+        
+        if codigo_cupon:
+            try:
+                print(f"🎫 [BACKEND] Intentando aplicar cupón: {codigo_cupon}")
+                
+                # Buscar el cupón
+                cupon = db.query(Cupon).filter(Cupon.codigo == codigo_cupon).first()
+                if not cupon:
+                    print(f"❌ [BACKEND] Cupón no encontrado: {codigo_cupon}")
+                    # No lanzar excepción, la reserva se crea sin cupón
+                else:
+                    print(f"✅ [BACKEND] Cupón encontrado: {cupon.codigo} - Tipo: {cupon.tipo} - Monto: {cupon.monto_descuento}")
+                    
+                    # Validaciones del cupón
+                    if cupon.estado != "activo":
+                        print(f"❌ [BACKEND] Cupón no está activo: {cupon.estado}")
+                    elif cupon.fecha_expiracion and cupon.fecha_expiracion < date.today():
+                        print(f"❌ [BACKEND] Cupón expirado: {cupon.fecha_expiracion}")
+                    elif cupon.id_reserva:
+                        print(f"❌ [BACKEND] Cupón ya utilizado en reserva: {cupon.id_reserva}")
+                    elif cupon.id_usuario and cupon.id_usuario != reserva_data.id_usuario:
+                        print(f"❌ [BACKEND] Cupón no válido para este usuario. Cupón usuario: {cupon.id_usuario}, Reserva usuario: {reserva_data.id_usuario}")
+                    else:
+                        # ✅ APLICAR DESCUENTO - LÓGICA CORREGIDA (CONVERSIÓN A FLOAT)
+                        if cupon.tipo == "porcentaje":
+                            # ✅ CORRECCIÓN CRÍTICA: Convertir decimal.Decimal a float
+                            descuento = (costo_total * float(cupon.monto_descuento)) / 100
+                            print(f"🎫 [BACKEND] Descuento porcentual: {cupon.monto_descuento}% = ${descuento}")
+                        else:  # fijo
+                            # ✅ CORRECCIÓN CRÍTICA: Convertir decimal.Decimal a float
+                            descuento = float(cupon.monto_descuento)
+                            print(f"🎫 [BACKEND] Descuento fijo: ${descuento}")
+                        
+                        # Asegurar que el descuento no sea mayor al costo total
+                        if descuento > costo_total:
+                            descuento = costo_total
+                            print(f"⚠️ [BACKEND] Descuento ajustado a costo total: ${descuento}")
+                        
+                        nuevo_costo = costo_total - descuento
+                        
+                        # Actualizar reserva y cupón
+                        nueva_reserva.costo_total = nuevo_costo
+                        cupon.id_reserva = nueva_reserva.id_reserva
+                        cupon.estado = "utilizado"
+                        
+                        db.commit()
+                        db.refresh(nueva_reserva)
+                        
+                        cupon_aplicado = True
+                        descuento_aplicado = float(descuento)
+                        
+                        print(f"✅ [BACKEND] Cupón aplicado exitosamente: ${descuento_aplicado} de descuento")
+                        print(f"💰 [BACKEND] Costo actualizado: ${nuevo_costo} (antes: ${costo_inicial})")
+                        
+            except Exception as cupon_error:
+                print(f"⚠️ [BACKEND] Error aplicando cupón: {str(cupon_error)}")
+                import traceback
+                traceback.print_exc()
+                # No revertir la reserva por error en cupón, la reserva se mantiene con costo original
+        
         # ✅ CONFIRMAR QUE LA RESERVA SE GUARDÓ CORRECTAMENTE
         reserva_verificada = db.query(Reserva).filter(Reserva.id_reserva == nueva_reserva.id_reserva).first()
-        print(f"🔍 [BACKEND] Reserva verificada en BD: ID {reserva_verificada.id_reserva}, Estado: {reserva_verificada.estado}, Código: {reserva_verificada.codigo_reserva}")
+        print(f"🔍 [BACKEND] Reserva verificada en BD: ID {reserva_verificada.id_reserva}, Estado: {reserva_verificada.estado}, Código: {reserva_verificada.codigo_reserva}, Costo Final: ${reserva_verificada.costo_total}")
         
         return nueva_reserva
         
@@ -231,8 +307,6 @@ def create_reserva(reserva_data: ReservaCreate, db: Session = Depends(get_db)):
             status_code=500,
             detail=f"Error al crear reserva: {str(e)}"
         )
-
-# ... (los otros endpoints se mantienen igual hasta get_horarios_disponibles)
 
 @router.get("/cancha/{cancha_id}/horarios-disponibles")
 def get_horarios_disponibles(
@@ -304,8 +378,6 @@ def get_horarios_disponibles(
             status_code=500, 
             detail=f"Error al obtener horarios disponibles: {str(e)}"
         )
-
-# ... (el resto de los endpoints se mantienen igual)
 
 @router.get("/verificar-disponibilidad")
 def verificar_disponibilidad(
