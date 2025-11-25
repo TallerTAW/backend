@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, Text, DateTime
+from sqlalchemy import Column, String, Integer, Text, DateTime, Float
 from sqlalchemy.orm import relationship
 from app.database import Base
 from sqlalchemy.sql import func
@@ -13,6 +13,8 @@ class EspacioDeportivo(Base):
     estado = Column(String(20), default="activo")
     descripcion = Column(Text)
     imagen = Column(String(255)) 
+    latitud = Column(Float, nullable=True)    # NUEVO
+    longitud = Column(Float, nullable=True)   # NUEVO
     fecha_creacion = Column(DateTime(timezone=True), server_default=func.now())
     
     # Relaciones

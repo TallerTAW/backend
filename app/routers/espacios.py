@@ -135,6 +135,8 @@ async def update_espacio(
     ubicacion: Optional[str] = Form(None),
     capacidad: Optional[int] = Form(None),
     descripcion: Optional[str] = Form(None),
+    latitud: Optional[float] = Form(None),
+    longitud: Optional[float] = Form(None),
     imagen: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db)
 ):
@@ -161,7 +163,10 @@ async def update_espacio(
         espacio.capacidad = capacidad
     if descripcion is not None:
         espacio.descripcion = descripcion
-    
+    if latitud is not None:
+        espacio.latitud = latitud
+    if longitud is not None:
+        espacio.longitud = longitud
     # Procesar nueva imagen si se proporciona
     if imagen and imagen.size > 0:
         if imagen.size > MAX_FILE_SIZE:
@@ -212,14 +217,22 @@ def activar_espacio(espacio_id: int, db: Session = Depends(get_db)):
 
 
 
+@router.get("/", response_model=list[EspacioDeportivoResponse])
+def list_espacios(include_inactive: bool = False, db: Session = Depends(get_db)):
+    query = db.query(EspacioDeportivo)
+    if not include_inactive:
+        query = query.filter(EspacioDeportivo.estado == "activo")
+    return query.order_by(EspacioDeportivo.fecha_creacion.desc()).all()
+
 @router.get("/nearby")
 def get_espacios_cercanos(lat: float, lon: float, radius_km: float = 5.0, db: Session = Depends(get_db)):
     """
-    Retorna espacios dentro de radius_km kilómetros del punto (lat, lon).
+    Devuelve espacios dentro de radius_km kilómetros del punto (lat, lon).
+    Retorna cada fila con un campo distance_km.
     """
-    # Haversine en SQL (PostgreSQL). usa COALESCE para excluir nulos
+    # Haversine implementado en SQL (Postgres)
     sql = text("""
-      SELECT *,
+      SELECT id_espacio_deportivo, nombre, ubicacion, capacidad, descripcion, imagen, latitud, longitud,
       (6371 * acos(
         cos(radians(:lat)) * cos(radians(latitud)) * cos(radians(longitud) - radians(:lon))
         + sin(radians(:lat)) * sin(radians(latitud))
@@ -231,13 +244,11 @@ def get_espacios_cercanos(lat: float, lon: float, radius_km: float = 5.0, db: Se
         + sin(radians(:lat)) * sin(radians(latitud))
       )) <= :radius
       ORDER BY distance_km ASC
-      LIMIT 100;
+      LIMIT 200;
     """)
     result = db.execute(sql, {"lat": lat, "lon": lon, "radius": radius_km})
     rows = [dict(r) for r in result]
     return rows
-
-
 
 
 @router.get("/gestor/mis-espacios", response_model=list[EspacioDeportivoResponse])
