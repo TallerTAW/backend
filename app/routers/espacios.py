@@ -52,10 +52,29 @@ def get_espacios(include_inactive: bool = False, db: Session = Depends(get_db)):
 
 @router.get("/{espacio_id}", response_model=EspacioDeportivoResponse)
 def get_espacio(espacio_id: int, db: Session = Depends(get_db)):
-    espacio = db.query(EspacioDeportivo).filter(EspacioDeportivo.id_espacio_deportivo == espacio_id).first()
-    if not espacio:
+    # Buscamos espacio y usuario en la misma consulta
+    resultado = db.query(EspacioDeportivo, Usuario)\
+        .outerjoin(Administra, EspacioDeportivo.id_espacio_deportivo == Administra.id_espacio_deportivo)\
+        .outerjoin(Usuario, Administra.id_usuario == Usuario.id_usuario)\
+        .filter(EspacioDeportivo.id_espacio_deportivo == espacio_id)\
+        .first()
+
+    if not resultado:
         raise HTTPException(status_code=404, detail="Espacio deportivo no encontrado")
-    return espacio
+    
+    espacio, gestor = resultado
+    espacio_dict = espacio.__dict__
+
+    if gestor:
+        espacio_dict['gestor_id'] = gestor.id_usuario
+        espacio_dict['gestor_nombre'] = gestor.nombre
+        espacio_dict['gestor_apellido'] = gestor.apellido
+    else:
+        espacio_dict['gestor_id'] = None
+        espacio_dict['gestor_nombre'] = None
+        espacio_dict['gestor_apellido'] = None
+
+    return espacio_dict
 
 @router.post("/", response_model=EspacioDeportivoResponse)
 async def create_espacio(
@@ -135,6 +154,9 @@ async def update_espacio(
     ubicacion: Optional[str] = Form(None),
     capacidad: Optional[int] = Form(None),
     descripcion: Optional[str] = Form(None),
+    latitud: Optional[float] = Form(None),
+    longitud: Optional[float] = Form(None),
+    gestor_id: Optional[int] = Form(None),
     imagen: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db)
 ):
@@ -161,7 +183,10 @@ async def update_espacio(
         espacio.capacidad = capacidad
     if descripcion is not None:
         espacio.descripcion = descripcion
-    
+    if latitud is not None:
+        espacio.latitud = latitud
+    if longitud is not None:
+        espacio.longitud = longitud
     # Procesar nueva imagen si se proporciona
     if imagen and imagen.size > 0:
         if imagen.size > MAX_FILE_SIZE:
@@ -175,6 +200,20 @@ async def update_espacio(
         
         # Guardar nueva imagen
         espacio.imagen = save_uploaded_file(imagen)
+
+    if gestor_id is not None: # Si se envió un valor (incluso vacío para desasignar)
+        # 1. Eliminar asignaciones previas para este espacio
+        db.query(Administra).filter(
+            Administra.id_espacio_deportivo == espacio_id
+        ).delete()
+        
+        # 2. Crear la nueva si no es vacío
+        if gestor_id > 0: # Asumiendo que envías un ID válido
+            nuevo_admin = Administra(
+                id_usuario=gestor_id,
+                id_espacio_deportivo=espacio_id
+            )
+            db.add(nuevo_admin)
     
     db.commit()
     db.refresh(espacio)
@@ -212,14 +251,22 @@ def activar_espacio(espacio_id: int, db: Session = Depends(get_db)):
 
 
 
+@router.get("/", response_model=list[EspacioDeportivoResponse])
+def list_espacios(include_inactive: bool = False, db: Session = Depends(get_db)):
+    query = db.query(EspacioDeportivo)
+    if not include_inactive:
+        query = query.filter(EspacioDeportivo.estado == "activo")
+    return query.order_by(EspacioDeportivo.fecha_creacion.desc()).all()
+
 @router.get("/nearby")
 def get_espacios_cercanos(lat: float, lon: float, radius_km: float = 5.0, db: Session = Depends(get_db)):
     """
-    Retorna espacios dentro de radius_km kilómetros del punto (lat, lon).
+    Devuelve espacios dentro de radius_km kilómetros del punto (lat, lon).
+    Retorna cada fila con un campo distance_km.
     """
-    # Haversine en SQL (PostgreSQL). usa COALESCE para excluir nulos
+    # Haversine implementado en SQL (Postgres)
     sql = text("""
-      SELECT *,
+      SELECT id_espacio_deportivo, nombre, ubicacion, capacidad, descripcion, imagen, latitud, longitud,
       (6371 * acos(
         cos(radians(:lat)) * cos(radians(latitud)) * cos(radians(longitud) - radians(:lon))
         + sin(radians(:lat)) * sin(radians(latitud))
@@ -231,13 +278,11 @@ def get_espacios_cercanos(lat: float, lon: float, radius_km: float = 5.0, db: Se
         + sin(radians(:lat)) * sin(radians(latitud))
       )) <= :radius
       ORDER BY distance_km ASC
-      LIMIT 100;
+      LIMIT 200;
     """)
     result = db.execute(sql, {"lat": lat, "lon": lon, "radius": radius_km})
     rows = [dict(r) for r in result]
     return rows
-
-
 
 
 @router.get("/gestor/mis-espacios", response_model=list[EspacioDeportivoResponse])
@@ -290,24 +335,55 @@ def get_espacios_gestor(
         )
     
 
+
+
 @router.get("/admin/todos-espacios", response_model=list[EspacioDeportivoResponse])
 def get_todos_espacios_admin(
     include_inactive: bool = False,
     db: Session = Depends(get_db),
     current_user: Usuario = Depends(get_current_user)
 ):
-    """Endpoint exclusivo para admin - todos los espacios sin restricciones"""
+    """Endpoint admin: Cruza Espacios con Usuarios a través de la tabla Administra"""
     if current_user.rol != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Solo los administradores pueden acceder a este endpoint"
         )
     
-    query = db.query(EspacioDeportivo)
+    # AQUÍ ESTÁ EL "CRUCE" (JOIN)
+    # 1. Seleccionamos EspacioDeportivo Y Usuario
+    # 2. Unimos con la tabla intermedia 'Administra'
+    # 3. Unimos con la tabla 'Usuario' para sacar el nombre
+    query = db.query(EspacioDeportivo, Usuario)\
+        .outerjoin(Administra, EspacioDeportivo.id_espacio_deportivo == Administra.id_espacio_deportivo)\
+        .outerjoin(Usuario, Administra.id_usuario == Usuario.id_usuario)
+    
     if not include_inactive:
         query = query.filter(EspacioDeportivo.estado == "activo")
     
-    return query.all()
+    results = query.all()
+
+    # Procesamos los resultados para combinarlos en un solo objeto
+    lista_final = []
+    for espacio, gestor in results:
+        # Convertimos el espacio a diccionario para poder agregarle campos extra
+        espacio_data = espacio.__dict__
+        
+        if gestor:
+            # Si el cruce encontró un gestor, agregamos sus datos
+            espacio_data['gestor_id'] = gestor.id_usuario
+            espacio_data['gestor_nombre'] = gestor.nombre
+            espacio_data['gestor_apellido'] = gestor.apellido
+        else:
+            # Si no hay gestor (el cruce no trajo nada), enviamos null
+            espacio_data['gestor_id'] = None
+            espacio_data['gestor_nombre'] = None
+            espacio_data['gestor_apellido'] = None
+            
+        lista_final.append(espacio_data)
+    
+    return lista_final
+
 
 @router.post("/{usuario_id}/asignar-espacio/{espacio_id}")
 def asignar_espacio_gestor(
