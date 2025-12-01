@@ -1,11 +1,21 @@
+from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.usuario import Usuario
 from app.schemas.usuario import UsuarioResponse, UsuarioCreate, UsuarioUpdate
 from app.core.security import get_password_hash
+from app.core.security import get_current_user
 
 router = APIRouter()
+
+
+@router.get("/rol/gestores", response_model=List[UsuarioResponse]) # Usa tu esquema de respuesta de usuario (ej. UsuarioResponse)
+def get_gestores(db: Session = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
+    # Opcional: Validar que el current_user sea admin
+    gestores = db.query(Usuario).filter(Usuario.rol == 'gestor', Usuario.estado == 'activo').all()
+    return gestores
+
 
 @router.get("/", response_model=list[UsuarioResponse])
 def get_usuarios(include_inactive: bool = False, db: Session = Depends(get_db)):
@@ -146,3 +156,4 @@ def cambiar_contrasenia(
     db.commit()
     
     return {"detail": "Contraseña actualizada exitosamente"}
+

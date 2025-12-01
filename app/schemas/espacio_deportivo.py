@@ -12,6 +12,11 @@ class EspacioDeportivoBase(BaseModel):
    latitud: Optional[float] = Field(None, ge=-90, le=90)
    longitud: Optional[float] = Field(None, ge=-180, le=180)
 
+
+   gestor_id: Optional[int] = None
+   gestor_nombre: Optional[str] = None
+   gestor_apellido: Optional[str] = None
+
 class EspacioDeportivoCreate(EspacioDeportivoBase):
     pass
 
@@ -31,6 +36,10 @@ class EspacioDeportivoUpdate(BaseModel):
 class EspacioDeportivoResponse(EspacioDeportivoBase):
     id_espacio_deportivo: int
     fecha_creacion: datetime
+
+    gestor_id: Optional[int] = None
+    gestor_nombre: Optional[str] = None
+    gestor_apellido: Optional[str] = None
     
     class Config:
         from_attributes = True
