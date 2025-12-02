@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import (
     auth, notifications, reservas_opcion, usuarios, espacios, canchas, disciplinas, cupones,
-    pagos, reportes, control_acceso, content, incidentes, comentarios, notifications, reservas  # ✅ AGREGAR reservas
+    pagos, reportes, control_acceso, content, incidentes, comentarios, notifications
 )
 from app.database import engine, Base
 from fastapi.staticfiles import StaticFiles
@@ -51,8 +51,8 @@ app.include_router(cupones.router, prefix="/cupones", tags=["Cupones"])
 app.include_router(disciplinas.router, prefix="/disciplinas", tags=["Disciplinas"])
 
 # ✅ RESERVAS CON PREFIJOS DIFERENTES
-app.include_router(reservas.router, prefix="/reservas", tags=["Reservas Básicas"])
-app.include_router(reservas_opcion.router, prefix="/reservas-completas", tags=["Reservas Completas"])
+#app.include_router(reservas.router, prefix="/reservas", tags=["Reservas Básicas"])
+app.include_router(reservas_opcion.router, prefix="/reservas", tags=["Reservas Completas"])
 
 app.include_router(pagos.router, prefix="/pagos", tags=["Pagos"])
 app.include_router(reportes.router, prefix="/reportes", tags=["Reportes"])
