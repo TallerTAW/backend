@@ -1,19 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from typing import Dict, Any, List
 from sqlalchemy.orm import Session
-
-# Importaciones de tu proyecto
 from app.database import get_db 
-from app.models.website_content import WebsiteContent # Asume que este modelo existe
+from app.models.website_content import WebsiteContent
 from app.schemas.content import ContentUpdate 
 
-from app.core.core import allowed_roles # Asume que esta función ya fue creada en app/core/core.py
+from app.core.core import allowed_roles
 
 router = APIRouter()
-
-# -----------------------------------------------------------
-# RUTA GET (Solo Lectura)
-# -----------------------------------------------------------
 
 @router.get("/", response_model=Dict[str, str])
 def get_website_content(db: Session = Depends(get_db)):
@@ -23,12 +17,7 @@ def get_website_content(db: Session = Depends(get_db)):
         content_map = {item.key: item.value for item in content_objects}
         return content_map
     except Exception as e:
-        # En caso de error de conexión o modelo
         raise HTTPException(status_code=500, detail="Error al obtener contenido del sitio web.")
-
-# -----------------------------------------------------------
-# RUTA PUT (Actualización - Protegida por Token y Rol)
-# -----------------------------------------------------------
 
 @router.put("/{content_key}", response_model=Dict[str, str])
 def update_website_content(

@@ -6,7 +6,7 @@ from app.database import get_db
 from app.models.cancha import Cancha
 from app.models.espacio_deportivo import EspacioDeportivo
 from app.models.administra import Administra
-from app.models.cancha_disciplina import CanchaDisciplina  # ✅ Importar el modelo de relación
+from app.models.cancha_disciplina import CanchaDisciplina
 from app.schemas.cancha import CanchaResponse, CanchaCreate, CanchaUpdate, DisponibilidadResponse, HorarioDisponible
 from app.core.security import get_current_user
 from app.models.usuario import Usuario
@@ -200,14 +200,34 @@ def get_canchas(
     db: Session = Depends(get_db),
     current_user: Usuario = Depends(get_current_user)
 ):
-    """Obtener canchas según permisos del usuario"""
+    """
+    Obtener canchas según el rol del usuario
+    - Admin: ve todas las canchas
+    - Gestor/Control: ve solo las canchas de espacios que administra
+    - Cliente: no puede acceder
+    """
     if current_user.rol == "cliente":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No tienes permisos para gestionar canchas"
         )
     
-    return obtener_canchas_por_rol(current_user, db)
+    if current_user.rol == "admin":
+        # Admin ve todas las canchas
+        canchas = db.query(Cancha).all()
+    else:
+        # Gestor o control_acceso ve solo las canchas de espacios que administra
+        canchas = db.query(Cancha).join(
+            EspacioDeportivo,
+            Cancha.id_espacio_deportivo == EspacioDeportivo.id_espacio_deportivo
+        ).join(
+            Administra,
+            EspacioDeportivo.id_espacio_deportivo == Administra.id_espacio_deportivo
+        ).filter(
+            Administra.id_usuario == current_user.id_usuario
+        ).all()
+    
+    return canchas
 
 @router.get("/{cancha_id}", response_model=CanchaResponse)
 def get_cancha(
@@ -520,20 +540,6 @@ def activar_cancha(
     db.refresh(cancha)
     
     return {"detail": "Cancha activada correctamente"}
-
-@router.get("/gestor/mis-canchas", response_model=list[CanchaResponse])
-def get_canchas_gestor(
-    db: Session = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user)
-):
-    """Obtener canchas según el rol del usuario (endpoint específico)"""
-    if current_user.rol == "cliente":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="No tienes permisos para acceder a estas canchas"
-        )
-    
-    return obtener_canchas_por_rol(current_user, db)
 
 @router.get("/public/disponibles", response_model=list[CanchaResponse])
 def get_canchas_disponibles(db: Session = Depends(get_db)):

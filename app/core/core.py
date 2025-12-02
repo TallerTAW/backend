@@ -7,7 +7,7 @@ def allowed_roles(current_user: Any, required_roles: List[str]) -> bool:
     current_user debe ser el objeto retornado por get_current_user,
     y asumimos que tiene un atributo 'rol'.
     """
-    # Convertimos el rol del usuario a minúsculas por seguridad en la comparación
+    # Convertimos el rol del usuario a minúsculas
     user_role = current_user.rol.lower() 
     
     # Verificamos si el rol del usuario está en la lista de roles requeridos

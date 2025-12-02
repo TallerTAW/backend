@@ -142,7 +142,6 @@ def generar_cupones_lote(lote_data: CuponGenerarLote, db: Session = Depends(get_
     
     db.commit()
     
-    # Refrescar los objetos para obtener los IDs
     for cupon in cupones_generados:
         db.refresh(cupon)
     
