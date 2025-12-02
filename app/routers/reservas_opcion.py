@@ -1,13 +1,6 @@
-# 📍 ARCHIVO: app/routers/reservas_opcion.py
-# 🎯 PROPÓSITO: Endpoint completo de reservas con debugging mejorado
-# 💡 CAMBIOS: 
-#   - Debugging extensivo en el endpoint de horarios
-#   - Validaciones mejoradas
-#   - Respuestas más informativas
-
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_
+from fastapi import APIRouter, Depends, HTTPException, status, Query
+from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import and_, or_, func
 from datetime import datetime, date, time
 from typing import List, Optional
 from app.database import get_db
@@ -15,63 +8,34 @@ from app.models.reserva import Reserva
 from app.models.cancha import Cancha
 from app.models.usuario import Usuario
 from app.models.disciplina import Disciplina
+from app.models.espacio_deportivo import EspacioDeportivo
+from app.models.administra import Administra
 from app.schemas.reserva import ReservaResponse, ReservaCreate, ReservaUpdate
-from app.core.security import get_password_hash
+from app.core.security import get_current_user
 import random
 import string
-from app.schemas.cancha import VerificarDisponibilidadRequest
-from sqlalchemy import text
-
 
 router = APIRouter()
 
+# ✅ FUNCIONES AUXILIARES 
 def generar_codigo_reserva():
-    """Generar código único para la reserva - MEJORADO"""
+    """Generar código único para la reserva"""
     letras = string.ascii_uppercase
     numeros = string.digits
-    # Formato: AAA111 (3 letras + 3 números)
     codigo = ''.join(random.choices(letras, k=3)) + ''.join(random.choices(numeros, k=3))
     return codigo
 
 def generar_codigo_unico_reserva(db: Session, max_intentos=10):
-    """Generar código único con validación - NUEVA FUNCIÓN MEJORADA"""
+    """Generar código único con validación"""
     for intento in range(max_intentos):
         codigo = generar_codigo_reserva()
-        # Verificar que no exista
         existe = db.query(Reserva).filter(Reserva.codigo_reserva == codigo).first()
         if not existe:
             return codigo
-    
-    # Si falla después de varios intentos, usar timestamp
     timestamp = int(datetime.now().timestamp())
     return f"RES{timestamp}"
 
-def calcular_costo_total(hora_inicio: time, hora_fin: time, precio_por_hora: float) -> float:
-    """Calcular el costo total basado en la duración y precio por hora"""
-    duracion_minutos = (hora_fin.hour * 60 + hora_fin.minute) - (hora_inicio.hour * 60 + hora_inicio.minute)
-    duracion_horas = duracion_minutos / 60.0
-    return round(duracion_horas * precio_por_hora, 2)
-
-def verificar_disponibilidad_cancha(db: Session, id_cancha: int, fecha_reserva: date, hora_inicio: time, hora_fin: time, id_reserva_excluir: Optional[int] = None):
-    """Verificar si la cancha está disponible en el horario solicitado"""
-    query = db.query(Reserva).filter(
-        Reserva.id_cancha == id_cancha,
-        Reserva.fecha_reserva == fecha_reserva,
-        Reserva.estado.in_(["pendiente", "confirmada", "en_curso"]),
-        or_(
-            # Solapamiento de horarios
-            and_(Reserva.hora_inicio <= hora_inicio, Reserva.hora_fin > hora_inicio),
-            and_(Reserva.hora_inicio < hora_fin, Reserva.hora_fin >= hora_fin),
-            and_(Reserva.hora_inicio >= hora_inicio, Reserva.hora_fin <= hora_fin)
-        )
-    )
-    
-    if id_reserva_excluir:
-        query = query.filter(Reserva.id_reserva != id_reserva_excluir)
-    
-    reserva_conflicto = query.first()
-    return reserva_conflicto is None
-
+# ✅ ENDPOINT PRINCIPAL - VERSIÓN SIMPLIFICADA Y FUNCIONAL
 @router.get("/", response_model=List[ReservaResponse])
 def get_reservas(
     skip: int = 0,
@@ -81,10 +45,248 @@ def get_reservas(
     fecha_fin: Optional[date] = None,
     id_usuario: Optional[int] = None,
     id_cancha: Optional[int] = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user)
 ):
-    """Obtener lista de reservas con filtros opcionales"""
+    """
+    🎯 OBTENER RESERVAS CON FILTRADO POR ROL - VERSIÓN SIMPLIFICADA
+    """
+    print(f"🔍 [GET_RESERVAS] Usuario: {current_user.rol} ID: {current_user.id_usuario}")
+    
+    # ✅ QUERY BASE
+    query = db.query(Reserva).options(
+        joinedload(Reserva.usuario),
+        joinedload(Reserva.cancha),
+        joinedload(Reserva.disciplina)
+    )
+    
+    # ✅ FILTRADO POR ROL - ESTO ES CRÍTICO
+    if current_user.rol == 'cliente':
+        print(f"🔒 [CLIENTE] Filtrando solo reservas del usuario {current_user.id_usuario}")
+        query = query.filter(Reserva.id_usuario == current_user.id_usuario)
+        
+    elif current_user.rol == 'gestor':
+        print(f"🔒 [GESTOR] Filtrando reservas de espacios gestionados")
+        
+        # 1. Obtener espacios que gestiona
+        espacios_gestor = db.query(Administra).filter(
+            Administra.id_usuario == current_user.id_usuario
+        ).all()
+        
+        if not espacios_gestor:
+            print("❌ [GESTOR] No tiene espacios asignados")
+            return []
+        
+        espacios_ids = [espacio.id_espacio_deportivo for espacio in espacios_gestor]
+        print(f"📋 [GESTOR] Espacios IDs: {espacios_ids}")
+        
+        # 2. Obtener canchas de esos espacios
+        canchas_gestor = db.query(Cancha).filter(
+            Cancha.id_espacio_deportivo.in_(espacios_ids)
+        ).all()
+        
+        if not canchas_gestor:
+            print("❌ [GESTOR] No hay canchas en sus espacios")
+            return []
+        
+        canchas_ids = [cancha.id_cancha for cancha in canchas_gestor]
+        print(f"📋 [GESTOR] Canchas IDs: {canchas_ids}")
+        
+        # 3. Filtrar reservas por esas canchas
+        query = query.filter(Reserva.id_cancha.in_(canchas_ids))
+        
+    elif current_user.rol == 'admin':
+        print("🔓 [ADMIN] Mostrando todas las reservas")
+        # Admin ve todo, no se aplica filtro
+    
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Rol de usuario no válido"
+        )
+    
+    # ✅ APLICAR FILTROS ADICIONALES
+    if estado:
+        query = query.filter(Reserva.estado == estado)
+        print(f"🔍 Filtro estado: {estado}")
+    
+    if fecha_inicio:
+        query = query.filter(Reserva.fecha_reserva >= fecha_inicio)
+        print(f"🔍 Filtro fecha_inicio: {fecha_inicio}")
+    
+    if fecha_fin:
+        query = query.filter(Reserva.fecha_reserva <= fecha_fin)
+        print(f"🔍 Filtro fecha_fin: {fecha_fin}")
+    
+    if id_usuario and current_user.rol in ['admin', 'gestor']:
+        query = query.filter(Reserva.id_usuario == id_usuario)
+        print(f"🔍 Filtro usuario: {id_usuario}")
+    
+    if id_cancha:
+        query = query.filter(Reserva.id_cancha == id_cancha)
+        print(f"🔍 Filtro cancha: {id_cancha}")
+    
+    # ✅ EJECUTAR CON ORDEN
+    reservas = query.order_by(
+        Reserva.fecha_reserva.desc(),
+        Reserva.hora_inicio.desc()
+    ).offset(skip).limit(limit).all()
+    
+    print(f"✅ [RESULTADO] Encontradas {len(reservas)} reservas")
+    
+    # ✅ CONVERTIR A DICCIONARIOS
+    reservas_limpias = []
+    for reserva in reservas:
+        reserva_data = {
+            "id_reserva": reserva.id_reserva,
+            "fecha_reserva": reserva.fecha_reserva,
+            "hora_inicio": reserva.hora_inicio,
+            "hora_fin": reserva.hora_fin,
+            "cantidad_asistentes": reserva.cantidad_asistentes or 0,
+            "material_prestado": reserva.material_prestado,
+            "id_disciplina": reserva.id_disciplina,
+            "id_cancha": reserva.id_cancha,
+            "id_usuario": reserva.id_usuario,
+            "codigo_reserva": reserva.codigo_reserva or f"TEMP-{reserva.id_reserva}",
+            "estado": reserva.estado,
+            "costo_total": float(reserva.costo_total) if reserva.costo_total else 0.0,
+            "fecha_creacion": reserva.fecha_creacion,
+        }
+        
+        # ✅ AGREGAR RELACIONES
+        if reserva.usuario:
+            reserva_data["usuario"] = {
+                "id_usuario": reserva.usuario.id_usuario,
+                "nombre": reserva.usuario.nombre,
+                "apellido": reserva.usuario.apellido,
+                "email": reserva.usuario.email,
+                "telefono": reserva.usuario.telefono
+            }
+        
+        if reserva.cancha:
+            reserva_data["cancha"] = {
+                "id_cancha": reserva.cancha.id_cancha,
+                "nombre": reserva.cancha.nombre,
+                "tipo": reserva.cancha.tipo,
+                "precio_por_hora": float(reserva.cancha.precio_por_hora) if reserva.cancha.precio_por_hora else 0.0
+            }
+            
+            # Cargar espacio deportivo
+            espacio = db.query(EspacioDeportivo).filter(
+                EspacioDeportivo.id_espacio_deportivo == reserva.cancha.id_espacio_deportivo
+            ).first()
+            
+            if espacio:
+                reserva_data["cancha"]["espacio"] = {
+                    "id_espacio_deportivo": espacio.id_espacio_deportivo,
+                    "nombre": espacio.nombre
+                }
+        
+        if reserva.disciplina:
+            reserva_data["disciplina"] = {
+                "id_disciplina": reserva.disciplina.id_disciplina,
+                "nombre": reserva.disciplina.nombre
+            }
+        
+        reservas_limpias.append(reserva_data)
+    
+    return reservas_limpias
+
+# ✅ NUEVO ENDPOINT: OBTENER FILTROS DISPONIBLES
+@router.get("/filtros/disponibles")
+def get_filtros_disponibles(
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user)
+):
+    """Obtener filtros disponibles según rol"""
+    
+    filtros = {
+        "estados": ["pendiente", "confirmada", "en_curso", "completada", "cancelada"],
+        "dias_semana": ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+    }
+    
+    if current_user.rol in ['admin', 'gestor']:
+        # Agregar espacios y canchas disponibles
+        if current_user.rol == 'admin':
+            espacios = db.query(EspacioDeportivo).filter(
+                EspacioDeportivo.estado == "activo"
+            ).all()
+            
+            filtros["espacios"] = [
+                {"id_espacio_deportivo": e.id_espacio_deportivo, "nombre": e.nombre}
+                for e in espacios
+            ]
+            
+        elif current_user.rol == 'gestor':
+            espacios_ids = db.query(Administra.id_espacio_deportivo).filter(
+                Administra.id_usuario == current_user.id_usuario
+            ).all()
+            
+            if espacios_ids:
+                espacios_ids = [e[0] for e in espacios_ids]
+                espacios = db.query(EspacioDeportivo).filter(
+                    EspacioDeportivo.id_espacio_deportivo.in_(espacios_ids),
+                    EspacioDeportivo.estado == "activo"
+                ).all()
+                
+                filtros["espacios"] = [
+                    {"id_espacio_deportivo": e.id_espacio_deportivo, "nombre": e.nombre}
+                    for e in espacios
+                ]
+    
+    return filtros
+
+# ✅ NUEVO ENDPOINT: OBTENER ESTADÍSTICAS
+@router.get("/estadisticas")
+def get_estadisticas_reservas(
+    estado: Optional[str] = None,
+    fecha_inicio: Optional[date] = None,
+    fecha_fin: Optional[date] = None,
+    id_cancha: Optional[int] = None,
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user)
+):
+    """Obtener estadísticas de reservas"""
+    
+    # Query base según rol
     query = db.query(Reserva)
+    
+    if current_user.rol == 'cliente':
+        query = query.filter(Reserva.id_usuario == current_user.id_usuario)
+    
+    elif current_user.rol == 'gestor':
+        # Obtener espacios del gestor
+        espacios_ids = db.query(Administra.id_espacio_deportivo).filter(
+            Administra.id_usuario == current_user.id_usuario
+        ).all()
+        
+        if espacios_ids:
+            espacios_ids = [e[0] for e in espacios_ids]
+            canchas_ids = db.query(Cancha.id_cancha).filter(
+                Cancha.id_espacio_deportivo.in_(espacios_ids)
+            ).all()
+            
+            if canchas_ids:
+                canchas_ids = [c[0] for c in canchas_ids]
+                query = query.filter(Reserva.id_cancha.in_(canchas_ids))
+            else:
+                return {
+                    "total": 0,
+                    "confirmadas": 0,
+                    "pendientes": 0,
+                    "en_curso": 0,
+                    "completadas": 0,
+                    "canceladas": 0
+                }
+        else:
+            return {
+                "total": 0,
+                "confirmadas": 0,
+                "pendientes": 0,
+                "en_curso": 0,
+                "completadas": 0,
+                "canceladas": 0
+            }
     
     # Aplicar filtros
     if estado:
@@ -96,37 +298,222 @@ def get_reservas(
     if fecha_fin:
         query = query.filter(Reserva.fecha_reserva <= fecha_fin)
     
-    if id_usuario:
-        query = query.filter(Reserva.id_usuario == id_usuario)
-    
     if id_cancha:
         query = query.filter(Reserva.id_cancha == id_cancha)
     
-    reservas = query.offset(skip).limit(limit).all()
+    # Calcular estadísticas
+    total = query.count()
+    confirmadas = query.filter(Reserva.estado == 'confirmada').count()
+    pendientes = query.filter(Reserva.estado == 'pendiente').count()
+    en_curso = query.filter(Reserva.estado == 'en_curso').count()
+    completadas = query.filter(Reserva.estado == 'completada').count()
+    canceladas = query.filter(Reserva.estado == 'cancelada').count()
     
-    # ✅ VALIDACIÓN ADICIONAL: Loggear si hay reservas sin código (para debugging)
-    reservas_sin_codigo = [r for r in reservas if not r.codigo_reserva]
-    if reservas_sin_codigo:
-        print(f"⚠️  ADVERTENCIA: {len(reservas_sin_codigo)} reservas sin código")
-    
-    return reservas
+    return {
+        "total": total,
+        "confirmadas": confirmadas,
+        "pendientes": pendientes,
+        "en_curso": en_curso,
+        "completadas": completadas,
+        "canceladas": canceladas
+    }
 
+# ✅ NUEVO ENDPOINT: OBTENER RESERVAS POR ESPACIO
+@router.get("/espacio/{espacio_id}")
+def get_reservas_por_espacio(
+    espacio_id: int,
+    estado: Optional[str] = None,
+    fecha_inicio: Optional[date] = None,
+    fecha_fin: Optional[date] = None,
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user)
+):
+    """Obtener reservas por espacio deportivo"""
+    
+    # Verificar permisos
+    if current_user.rol == 'cliente':
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes permiso para ver reservas por espacio"
+        )
+    
+    if current_user.rol == 'gestor':
+        # Verificar que el gestor administra este espacio
+        asignacion = db.query(Administra).filter(
+            Administra.id_usuario == current_user.id_usuario,
+            Administra.id_espacio_deportivo == espacio_id
+        ).first()
+        
+        if not asignacion:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No tienes permiso para ver reservas de este espacio"
+            )
+    
+    # Obtener canchas del espacio
+    canchas = db.query(Cancha).filter(
+        Cancha.id_espacio_deportivo == espacio_id
+    ).all()
+    
+    if not canchas:
+        return []
+    
+    canchas_ids = [cancha.id_cancha for cancha in canchas]
+    
+    # Query de reservas
+    query = db.query(Reserva).options(
+        joinedload(Reserva.usuario),
+        joinedload(Reserva.cancha),
+        joinedload(Reserva.disciplina)
+    ).filter(
+        Reserva.id_cancha.in_(canchas_ids)
+    )
+    
+    # Aplicar filtros
+    if estado:
+        query = query.filter(Reserva.estado == estado)
+    
+    if fecha_inicio:
+        query = query.filter(Reserva.fecha_reserva >= fecha_inicio)
+    
+    if fecha_fin:
+        query = query.filter(Reserva.fecha_reserva <= fecha_fin)
+    
+    # Ejecutar query
+    reservas = query.order_by(
+        Reserva.fecha_reserva.desc(),
+        Reserva.hora_inicio.desc()
+    ).offset(skip).limit(limit).all()
+    
+    # Convertir a respuesta
+    reservas_limpias = []
+    for reserva in reservas:
+        reserva_data = {
+            "id_reserva": reserva.id_reserva,
+            "fecha_reserva": reserva.fecha_reserva,
+            "hora_inicio": reserva.hora_inicio,
+            "hora_fin": reserva.hora_fin,
+            "cantidad_asistentes": reserva.cantidad_asistentes or 0,
+            "material_prestado": reserva.material_prestado,
+            "id_disciplina": reserva.id_disciplina,
+            "id_cancha": reserva.id_cancha,
+            "id_usuario": reserva.id_usuario,
+            "codigo_reserva": reserva.codigo_reserva or f"TEMP-{reserva.id_reserva}",
+            "estado": reserva.estado,
+            "costo_total": float(reserva.costo_total) if reserva.costo_total else 0.0,
+            "fecha_creacion": reserva.fecha_creacion,
+        }
+        
+        if reserva.usuario:
+            reserva_data["usuario"] = {
+                "id_usuario": reserva.usuario.id_usuario,
+                "nombre": reserva.usuario.nombre,
+                "apellido": reserva.usuario.apellido,
+                "email": reserva.usuario.email,
+                "telefono": reserva.usuario.telefono
+            }
+        
+        if reserva.cancha:
+            reserva_data["cancha"] = {
+                "id_cancha": reserva.cancha.id_cancha,
+                "nombre": reserva.cancha.nombre,
+                "tipo": reserva.cancha.tipo,
+                "precio_por_hora": float(reserva.cancha.precio_por_hora) if reserva.cancha.precio_por_hora else 0.0
+            }
+        
+        if reserva.disciplina:
+            reserva_data["disciplina"] = {
+                "id_disciplina": reserva.disciplina.id_disciplina,
+                "nombre": reserva.disciplina.nombre
+            }
+        
+        reservas_limpias.append(reserva_data)
+    
+    return reservas_limpias
+
+# ✅ ENDPOINT INDIVIDUAL
 @router.get("/{reserva_id}", response_model=ReservaResponse)
-def get_reserva(reserva_id: int, db: Session = Depends(get_db)):
+def get_reserva(reserva_id: int, db: Session = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
     """Obtener una reserva específica por ID"""
-    reserva = db.query(Reserva).filter(Reserva.id_reserva == reserva_id).first()
+    reserva = db.query(Reserva).options(
+        joinedload(Reserva.usuario),
+        joinedload(Reserva.cancha),
+        joinedload(Reserva.disciplina)
+    ).filter(Reserva.id_reserva == reserva_id).first()
+    
     if not reserva:
         raise HTTPException(status_code=404, detail="Reserva no encontrada")
     
-    # ✅ VALIDACIÓN: Verificar que tenga código
-    if not reserva.codigo_reserva:
-        print(f"⚠️  ADVERTENCIA: Reserva {reserva_id} sin código_reserva")
+    # ✅ VERIFICAR PERMISOS
+    if current_user.rol == 'cliente' and reserva.id_usuario != current_user.id_usuario:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes permiso para ver esta reserva"
+        )
     
-    return reserva
+    if current_user.rol == 'gestor':
+        # Verificar si la cancha pertenece a un espacio que gestiona
+        cancha = db.query(Cancha).filter(Cancha.id_cancha == reserva.id_cancha).first()
+        if cancha:
+            administra = db.query(Administra).filter(
+                Administra.id_usuario == current_user.id_usuario,
+                Administra.id_espacio_deportivo == cancha.id_espacio_deportivo
+            ).first()
+            
+            if not administra:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="No tienes permiso para ver esta reserva"
+                )
+    
+    # ✅ CONVERTIR A RESPUESTA
+    reserva_data = {
+        "id_reserva": reserva.id_reserva,
+        "fecha_reserva": reserva.fecha_reserva,
+        "hora_inicio": reserva.hora_inicio,
+        "hora_fin": reserva.hora_fin,
+        "cantidad_asistentes": reserva.cantidad_asistentes or 0,
+        "material_prestado": reserva.material_prestado,
+        "id_disciplina": reserva.id_disciplina,
+        "id_cancha": reserva.id_cancha,
+        "id_usuario": reserva.id_usuario,
+        "codigo_reserva": reserva.codigo_reserva or f"TEMP-{reserva.id_reserva}",
+        "estado": reserva.estado,
+        "costo_total": float(reserva.costo_total) if reserva.costo_total else 0.0,
+        "fecha_creacion": reserva.fecha_creacion,
+    }
+    
+    if reserva.usuario:
+        reserva_data["usuario"] = {
+            "id_usuario": reserva.usuario.id_usuario,
+            "nombre": reserva.usuario.nombre,
+            "apellido": reserva.usuario.apellido,
+            "email": reserva.usuario.email,
+            "telefono": reserva.usuario.telefono
+        }
+    
+    if reserva.cancha:
+        reserva_data["cancha"] = {
+            "id_cancha": reserva.cancha.id_cancha,
+            "nombre": reserva.cancha.nombre,
+            "tipo": reserva.cancha.tipo,
+            "precio_por_hora": float(reserva.cancha.precio_por_hora) if reserva.cancha.precio_por_hora else 0.0
+        }
+    
+    if reserva.disciplina:
+        reserva_data["disciplina"] = {
+            "id_disciplina": reserva.disciplina.id_disciplina,
+            "nombre": reserva.disciplina.nombre
+        }
+    
+    return reserva_data
 
+# ✅ CREAR RESERVA (mantener tu código existente)
 @router.post("/", response_model=ReservaResponse)
 def create_reserva(reserva_data: ReservaCreate, db: Session = Depends(get_db)):
-    """Crear una nueva reserva con validación de disponibilidad usando función PostgreSQL"""
+    """Crear nueva reserva"""
     print(f"🎯 [BACKEND] Iniciando creación de reserva: {reserva_data.dict()}")
     
     # Verificar que la cancha existe
@@ -144,67 +531,30 @@ def create_reserva(reserva_data: ReservaCreate, db: Session = Depends(get_db)):
     if not usuario:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
     
-    # VERIFICAR DISPONIBILIDAD USANDO FUNCIÓN POSTGRESQL
-    try:
-        print(f"🔍 [BACKEND] Verificando disponibilidad para cancha {reserva_data.id_cancha}, fecha {reserva_data.fecha_reserva}, horario {reserva_data.hora_inicio}-{reserva_data.hora_fin}")
-        
-        result = db.execute(
-            text("SELECT verificar_disponibilidad(:cancha_id, :fecha, :hora_inicio, :hora_fin) as disponible"),
-            {
-                "cancha_id": reserva_data.id_cancha,
-                "fecha": reserva_data.fecha_reserva,
-                "hora_inicio": reserva_data.hora_inicio,
-                "hora_fin": reserva_data.hora_fin
-            }
-        )
-        disponible = result.scalar()
-        
-        print(f"🔍 [BACKEND] Resultado verificación disponibilidad: {disponible}")
-        
-        if not disponible:
-            raise HTTPException(
-                status_code=400, 
-                detail="La cancha no está disponible en el horario solicitado"
-            )
-            
-    except Exception as e:
-        print(f"❌ [BACKEND] Error en verificación de disponibilidad: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error al verificar disponibilidad: {str(e)}"
-        )
+    # CALCULAR COSTO TOTAL (simplificado)
+    hora_inicio = reserva_data.hora_inicio
+    hora_fin = reserva_data.hora_fin
+    precio_hora = float(cancha.precio_por_hora) if cancha.precio_por_hora else 0.0
     
-    # Verificar que el horario esté dentro del rango de la cancha
-    if reserva_data.hora_inicio < cancha.hora_apertura or reserva_data.hora_fin > cancha.hora_cierre:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"El horario debe estar entre {cancha.hora_apertura} y {cancha.hora_cierre}"
-        )
+    duracion_horas = (
+        (hora_fin.hour * 60 + hora_fin.minute) - 
+        (hora_inicio.hour * 60 + hora_inicio.minute)
+    ) / 60.0
     
-    # Verificar que la fecha no sea en el pasado
-    if reserva_data.fecha_reserva < date.today():
-        raise HTTPException(status_code=400, detail="No se pueden hacer reservas en fechas pasadas")
+    costo_total = round(duracion_horas * precio_hora, 2)
     
-    # Calcular costo total
-    costo_total = calcular_costo_total(
-        reserva_data.hora_inicio, reserva_data.hora_fin, float(cancha.precio_por_hora)
-    )
-    
-    # ✅ CORRECCIÓN IMPORTANTE: Generar código único de reserva CON VALIDACIÓN MEJORADA
+    # GENERAR CÓDIGO DE RESERVA
     codigo_reserva = generar_codigo_unico_reserva(db)
     
-    # ✅ VALIDACIÓN EXTRA: Asegurar que el código no sea None
-    if not codigo_reserva:
-        codigo_reserva = f"RES-{int(datetime.now().timestamp())}"
+    # CREAR RESERVA
+    reserva_dict = reserva_data.dict()
+    codigo_cupon = reserva_dict.pop('codigo_cupon', None)
     
-    print(f"✅ [BACKEND] Generado código reserva: {codigo_reserva}")
-    
-    # Crear la reserva
     nueva_reserva = Reserva(
-        **reserva_data.dict(),
+        **reserva_dict,
         costo_total=costo_total,
-        codigo_reserva=codigo_reserva,  # ✅ GARANTIZADO que tiene valor
-        estado="pendiente"  # Estado inicial
+        codigo_reserva=codigo_reserva,
+        estado="pendiente"
     )
     
     try:
@@ -212,150 +562,224 @@ def create_reserva(reserva_data: ReservaCreate, db: Session = Depends(get_db)):
         db.commit()
         db.refresh(nueva_reserva)
         
-        # ✅ VERIFICACIÓN FINAL
-        if not nueva_reserva.codigo_reserva:
-            raise Exception("Error crítico: Reserva creada sin código")
-            
-        print(f"✅ [BACKEND] Reserva {nueva_reserva.id_reserva} creada exitosamente con código: {nueva_reserva.codigo_reserva}")
+        # Cargar relaciones
+        nueva_reserva = db.query(Reserva).options(
+            joinedload(Reserva.usuario),
+            joinedload(Reserva.cancha),
+            joinedload(Reserva.disciplina)
+        ).filter(Reserva.id_reserva == nueva_reserva.id_reserva).first()
         
-        # ✅ CONFIRMAR QUE LA RESERVA SE GUARDÓ CORRECTAMENTE
-        reserva_verificada = db.query(Reserva).filter(Reserva.id_reserva == nueva_reserva.id_reserva).first()
-        print(f"🔍 [BACKEND] Reserva verificada en BD: ID {reserva_verificada.id_reserva}, Estado: {reserva_verificada.estado}, Código: {reserva_verificada.codigo_reserva}")
+        # Convertir a respuesta
+        reserva_response = {
+            "id_reserva": nueva_reserva.id_reserva,
+            "fecha_reserva": nueva_reserva.fecha_reserva,
+            "hora_inicio": nueva_reserva.hora_inicio,
+            "hora_fin": nueva_reserva.hora_fin,
+            "cantidad_asistentes": nueva_reserva.cantidad_asistentes or 0,
+            "material_prestado": nueva_reserva.material_prestado,
+            "id_disciplina": nueva_reserva.id_disciplina,
+            "id_cancha": nueva_reserva.id_cancha,
+            "id_usuario": nueva_reserva.id_usuario,
+            "codigo_reserva": nueva_reserva.codigo_reserva,
+            "estado": nueva_reserva.estado,
+            "costo_total": float(nueva_reserva.costo_total) if nueva_reserva.costo_total else 0.0,
+            "fecha_creacion": nueva_reserva.fecha_creacion,
+        }
         
-        return nueva_reserva
+        if nueva_reserva.usuario:
+            reserva_response["usuario"] = {
+                "id_usuario": nueva_reserva.usuario.id_usuario,
+                "nombre": nueva_reserva.usuario.nombre,
+                "apellido": nueva_reserva.usuario.apellido,
+                "email": nueva_reserva.usuario.email,
+                "telefono": nueva_reserva.usuario.telefono
+            }
+        
+        if nueva_reserva.cancha:
+            reserva_response["cancha"] = {
+                "id_cancha": nueva_reserva.cancha.id_cancha,
+                "nombre": nueva_reserva.cancha.nombre,
+                "tipo": nueva_reserva.cancha.tipo,
+                "precio_por_hora": float(nueva_reserva.cancha.precio_por_hora) if nueva_reserva.cancha.precio_por_hora else 0.0
+            }
+        
+        if nueva_reserva.disciplina:
+            reserva_response["disciplina"] = {
+                "id_disciplina": nueva_reserva.disciplina.id_disciplina,
+                "nombre": nueva_reserva.disciplina.nombre
+            }
+        
+        return reserva_response
         
     except Exception as e:
         db.rollback()
-        print(f"❌ [BACKEND] Error al crear reserva: {str(e)}")
+        print(f"❌ Error al crear reserva: {str(e)}")
         raise HTTPException(
             status_code=500,
             detail=f"Error al crear reserva: {str(e)}"
         )
 
-# ... (los otros endpoints se mantienen igual hasta get_horarios_disponibles)
-
-@router.get("/cancha/{cancha_id}/horarios-disponibles")
-def get_horarios_disponibles(
-    cancha_id: int,
-    fecha: date,
-    db: Session = Depends(get_db)
-):
-    """Obtener horarios disponibles usando la función PostgreSQL - VERSIÓN CON DEBUGGING EXTENSIVO"""
-    try:
-        print(f"🔍 [BACKEND] SOLICITUD HORARIOS - Cancha: {cancha_id}, Fecha: {fecha}")
-        
-        # 1. Verificar que la cancha existe y está activa
-        cancha = db.query(Cancha).filter(Cancha.id_cancha == cancha_id).first()
-        if not cancha:
-            print(f"❌ [BACKEND] Cancha {cancha_id} no encontrada")
-            raise HTTPException(status_code=404, detail="Cancha no encontrada")
-        
-        print(f"✅ [BACKEND] Cancha encontrada: {cancha.nombre} (Activa: {cancha.estado})")
-        print(f"✅ [BACKEND] Horario cancha: {cancha.hora_apertura} - {cancha.hora_cierre}")
-        
-        # 2. Verificar reservas existentes DIRECTAMENTE para debugging
-        reservas_directas = db.execute(text("""
-            SELECT id_reserva, hora_inicio, hora_fin, estado, codigo_reserva 
-            FROM reserva 
-            WHERE id_cancha = :cancha_id 
-            AND fecha_reserva = :fecha
-            AND estado IN ('pendiente', 'confirmada', 'en_curso')
-            ORDER BY hora_inicio
-        """), {"cancha_id": cancha_id, "fecha": fecha}).fetchall()
-        
-        print(f"📊 [BACKEND] Reservas directas en BD: {len(reservas_directas)}")
-        for r in reservas_directas:
-            print(f"   - Reserva {r[0]}: {r[1]} a {r[2]} (Estado: {r[3]}, Código: {r[4]})")
-        
-        # 3. Ejecutar función PostgreSQL para obtener horarios
-        print(f"🔍 [BACKEND] Ejecutando función listar_horarios_disponibles({cancha_id}, '{fecha}')...")
-        
-        result = db.execute(
-            text("SELECT * FROM listar_horarios_disponibles(:p_id_cancha, :p_fecha)"),
-            {"p_id_cancha": cancha_id, "p_fecha": fecha}
-        ).fetchall()
-        
-        print(f"✅ [BACKEND] Función retornó {len(result)} horarios")
-        
-        # 4. Procesar resultados
-        horarios = []
-        for i, row in enumerate(result):
-            horario_data = {
-                "hora_inicio": str(row[0]),
-                "hora_fin": str(row[1]),
-                "disponible": row[2],
-                "precio_hora": float(row[3]) if row[3] else 0.0,
-                "mensaje": row[4]
-            }
-            horarios.append(horario_data)
-            print(f"📅 [BACKEND] Horario {i}: {horario_data}")
-        
-        # 5. Estadísticas para debugging
-        horarios_ocupados = [h for h in horarios if not h['disponible']]
-        print(f"📈 [BACKEND] Estadísticas - Total: {len(horarios)}, Ocupados: {len(horarios_ocupados)}, Disponibles: {len(horarios) - len(horarios_ocupados)}")
-        
-        return horarios
-        
-    except Exception as e:
-        print(f"❌ [BACKEND] ERROR en get_horarios_disponibles: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Error al obtener horarios disponibles: {str(e)}"
-        )
-
-# ... (el resto de los endpoints se mantienen igual)
-
-@router.get("/verificar-disponibilidad")
-def verificar_disponibilidad(
-    cancha_id: int,
-    fecha: date,
-    hora_inicio: str,
-    hora_fin: str,
-    db: Session = Depends(get_db)
-):
-    """Verificar disponibilidad usando la función PostgreSQL"""
-    try:
-        result = db.execute(
-            text("SELECT verificar_disponibilidad(:p_id_cancha, :p_fecha, :p_hora_inicio, :p_hora_fin)"),
-            {
-                "p_id_cancha": cancha_id,
-                "p_fecha": fecha,
-                "p_hora_inicio": hora_inicio,
-                "p_hora_fin": hora_fin
-            }
-        ).scalar()
-        
-        return {"disponible": result}
-        
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Error al verificar disponibilidad: {str(e)}"
-        )
-
-@router.get("/estado/{reserva_id}")
-def get_estado_reserva(reserva_id: int, db: Session = Depends(get_db)):
-    """Obtener el estado de una reserva específica"""
+# ✅ ACTUALIZAR RESERVA
+@router.patch("/{reserva_id}", response_model=ReservaResponse)
+def update_reserva(reserva_id: int, reserva_data: ReservaUpdate, db: Session = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
+    """Actualizar reserva"""
     reserva = db.query(Reserva).filter(Reserva.id_reserva == reserva_id).first()
     if not reserva:
         raise HTTPException(status_code=404, detail="Reserva no encontrada")
     
-    return {
-        "id_reserva": reserva.id_reserva,
-        "codigo_reserva": reserva.codigo_reserva,
-        "estado": reserva.estado,
-        "fecha_reserva": reserva.fecha_reserva,
-        "hora_inicio": reserva.hora_inicio,
-        "hora_fin": reserva.hora_fin
-    }
+    # ✅ VERIFICAR PERMISOS
+    if current_user.rol == 'cliente' and reserva.id_usuario != current_user.id_usuario:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes permiso para modificar esta reserva"
+        )
+    
+    # Actualizar campos permitidos
+    campos_permitidos = ['estado', 'material_prestado', 'cantidad_asistentes']
+    for campo, valor in reserva_data.dict(exclude_unset=True).items():
+        if campo in campos_permitidos and valor is not None:
+            setattr(reserva, campo, valor)
 
-@router.get("/codigo/{codigo_reserva}", response_model=ReservaResponse)
-def get_reserva_por_codigo(codigo_reserva: str, db: Session = Depends(get_db)):
-    """Obtener una reserva por su código único"""
-    reserva = db.query(Reserva).filter(Reserva.codigo_reserva == codigo_reserva).first()
+    try:
+        db.commit()
+        db.refresh(reserva)
+        
+        # Cargar relaciones
+        reserva = db.query(Reserva).options(
+            joinedload(Reserva.usuario),
+            joinedload(Reserva.cancha),
+            joinedload(Reserva.disciplina)
+        ).filter(Reserva.id_reserva == reserva.id_reserva).first()
+        
+        # Convertir a respuesta
+        reserva_response = {
+            "id_reserva": reserva.id_reserva,
+            "fecha_reserva": reserva.fecha_reserva,
+            "hora_inicio": reserva.hora_inicio,
+            "hora_fin": reserva.hora_fin,
+            "cantidad_asistentes": reserva.cantidad_asistentes or 0,
+            "material_prestado": reserva.material_prestado,
+            "id_disciplina": reserva.id_disciplina,
+            "id_cancha": reserva.id_cancha,
+            "id_usuario": reserva.id_usuario,
+            "codigo_reserva": reserva.codigo_reserva or f"TEMP-{reserva.id_reserva}",
+            "estado": reserva.estado,
+            "costo_total": float(reserva.costo_total) if reserva.costo_total else 0.0,
+            "fecha_creacion": reserva.fecha_creacion,
+        }
+        
+        if reserva.usuario:
+            reserva_response["usuario"] = {
+                "id_usuario": reserva.usuario.id_usuario,
+                "nombre": reserva.usuario.nombre,
+                "apellido": reserva.usuario.apellido,
+                "email": reserva.usuario.email,
+                "telefono": reserva.usuario.telefono
+            }
+        
+        if reserva.cancha:
+            reserva_response["cancha"] = {
+                "id_cancha": reserva.cancha.id_cancha,
+                "nombre": reserva.cancha.nombre,
+                "tipo": reserva.cancha.tipo,
+                "precio_por_hora": float(reserva.cancha.precio_por_hora) if reserva.cancha.precio_por_hora else 0.0
+            }
+        
+        if reserva.disciplina:
+            reserva_response["disciplina"] = {
+                "id_disciplina": reserva.disciplina.id_disciplina,
+                "nombre": reserva.disciplina.nombre
+            }
+        
+        return reserva_response
+        
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al actualizar reserva: {str(e)}"
+        )
+
+# ✅ CANCELAR RESERVA
+@router.delete("/{reserva_id}")
+def cancelar_reserva(reserva_id: int, motivo: str = None, db: Session = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
+    """Cancelar reserva"""
+    reserva = db.query(Reserva).filter(Reserva.id_reserva == reserva_id).first()
     if not reserva:
         raise HTTPException(status_code=404, detail="Reserva no encontrada")
     
-    return reserva
+    # ✅ VERIFICAR PERMISOS
+    if current_user.rol == 'cliente' and reserva.id_usuario != current_user.id_usuario:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes permiso para cancelar esta reserva"
+        )
+    
+    if reserva.estado == 'cancelada':
+        raise HTTPException(status_code=400, detail="La reserva ya está cancelada")
+    
+    reserva.estado = 'cancelada'
+    
+    try:
+        db.commit()
+        return {
+            "detail": "Reserva cancelada exitosamente", 
+            "motivo": motivo,
+            "reserva_id": reserva_id
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al cancelar reserva: {str(e)}"
+        )
+
+# ✅ ENDPOINT SIMPLE PARA ESTADÍSTICAS (opcional)
+@router.get("/resumen/estadisticas")
+def get_resumen_estadisticas(
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user)
+):
+    """Obtener resumen de estadísticas"""
+    
+    # Query base según rol
+    query = db.query(Reserva)
+    
+    if current_user.rol == 'cliente':
+        query = query.filter(Reserva.id_usuario == current_user.id_usuario)
+    
+    elif current_user.rol == 'gestor':
+        # Obtener espacios del gestor
+        espacios_ids = db.query(Administra.id_espacio_deportivo).filter(
+            Administra.id_usuario == current_user.id_usuario
+        ).all()
+        
+        if espacios_ids:
+            espacios_ids = [e[0] for e in espacios_ids]
+            canchas_ids = db.query(Cancha.id_cancha).filter(
+                Cancha.id_espacio_deportivo.in_(espacios_ids)
+            ).all()
+            
+            if canchas_ids:
+                canchas_ids = [c[0] for c in canchas_ids]
+                query = query.filter(Reserva.id_cancha.in_(canchas_ids))
+            else:
+                return {"total": 0, "por_estado": {}}
+        else:
+            return {"total": 0, "por_estado": {}}
+    
+    # Calcular total
+    total = query.count()
+    
+    # Por estado
+    por_estado = {}
+    estados = ['pendiente', 'confirmada', 'en_curso', 'completada', 'cancelada']
+    
+    for estado in estados:
+        count = query.filter(Reserva.estado == estado).count()
+        por_estado[estado] = count
+    
+    return {
+        "total": total,
+        "por_estado": por_estado
+    }
