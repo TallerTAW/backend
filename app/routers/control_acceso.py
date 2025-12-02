@@ -17,11 +17,9 @@ def validar_qr(codigo_reserva: str, db: Session = Depends(get_db)):
     if not reserva:
         raise HTTPException(status_code=404, detail="Reserva no encontrada")
     
-    # Verificar que la reserva esté confirmada
     if reserva.estado != "confirmada":
         raise HTTPException(status_code=400, detail=f"La reserva está {reserva.estado}")
     
-    # Verificar que la fecha de la reserva sea hoy
     hoy = datetime.now().date()
     if reserva.fecha_reserva != hoy:
         raise HTTPException(
@@ -29,7 +27,6 @@ def validar_qr(codigo_reserva: str, db: Session = Depends(get_db)):
             detail=f"La reserva es para el {reserva.fecha_reserva}, no para hoy"
         )
     
-    # Verificar que la hora actual esté dentro del rango de la reserva
     ahora = datetime.now().time()
     if ahora < reserva.hora_inicio or ahora > reserva.hora_fin:
         raise HTTPException(
@@ -37,7 +34,6 @@ def validar_qr(codigo_reserva: str, db: Session = Depends(get_db)):
             detail=f"Fuera del horario de reserva ({reserva.hora_inicio} - {reserva.hora_fin})"
         )
     
-    # Obtener información del usuario
     usuario = db.query(Usuario).filter(Usuario.id_usuario == reserva.id_usuario).first()
     
     return {
@@ -63,7 +59,6 @@ def registrar_ingreso(codigo_reserva: str, db: Session = Depends(get_db)):
     if not reserva:
         raise HTTPException(status_code=404, detail="Reserva no encontrada")
     
-    # Validaciones previas
     hoy = datetime.now().date()
     if reserva.fecha_reserva != hoy:
         raise HTTPException(status_code=400, detail="La reserva no es para hoy")
@@ -71,7 +66,6 @@ def registrar_ingreso(codigo_reserva: str, db: Session = Depends(get_db)):
     if reserva.estado != "confirmada":
         raise HTTPException(status_code=400, detail=f"No se puede registrar ingreso para reserva {reserva.estado}")
     
-    # Cambiar estado a "en_curso"
     reserva.estado = "en_curso"
     reserva.fecha_actualizacion = datetime.now()
     db.commit()
@@ -95,7 +89,6 @@ def registrar_salida(codigo_reserva: str, db: Session = Depends(get_db)):
     if reserva.estado != "en_curso":
         raise HTTPException(status_code=400, detail="La reserva no está en curso")
     
-    # Cambiar estado a "completada"
     reserva.estado = "completada"
     reserva.fecha_actualizacion = datetime.now()
     db.commit()

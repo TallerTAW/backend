@@ -10,7 +10,6 @@ import uuid
 import os
 import shutil
 from typing import Optional
-from math import radians, cos, sin, asin, sqrt
 from sqlalchemy import text
 
 # Configuración para uploads
@@ -43,12 +42,57 @@ def save_uploaded_file(file: UploadFile) -> str:
 router = APIRouter()
 
 @router.get("/", response_model=list[EspacioDeportivoResponse])
-def get_espacios(include_inactive: bool = False, db: Session = Depends(get_db)):
-    """Obtener espacios deportivos, incluir inactivos solo si se solicita"""
-    query = db.query(EspacioDeportivo)
+def get_espacios(
+    include_inactive: bool = False, 
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user)
+):
+    """
+    Obtener espacios deportivos según el rol del usuario
+    - Admin: ve todos los espacios con información del gestor
+    - Gestor/Control: ve solo los espacios que administra
+    """
+    
+    if current_user.rol == "admin":
+        # Admin ve todos los espacios con la información del gestor
+        query = db.query(EspacioDeportivo, Usuario)\
+            .outerjoin(Administra, EspacioDeportivo.id_espacio_deportivo == Administra.id_espacio_deportivo)\
+            .outerjoin(Usuario, Administra.id_usuario == Usuario.id_usuario)
+    elif current_user.rol in ["gestor", "control_acceso"]:
+        # Gestor o control_acceso ve solo los espacios que administra
+        query = db.query(EspacioDeportivo, Usuario)\
+            .join(Administra, EspacioDeportivo.id_espacio_deportivo == Administra.id_espacio_deportivo)\
+            .join(Usuario, Administra.id_usuario == Usuario.id_usuario)\
+            .filter(Administra.id_usuario == current_user.id_usuario)
+    else:
+        # Cliente o otros roles no deberían acceder aquí, pero por si acaso
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes permisos para acceder a estos espacios"
+        )
+    
     if not include_inactive:
         query = query.filter(EspacioDeportivo.estado == "activo")
-    return query.all()
+    
+    results = query.all()
+    
+    # Procesamos los resultados
+    lista_final = []
+    for espacio, gestor in results:
+        espacio_data = espacio.__dict__
+        
+        if gestor:
+            espacio_data['gestor_id'] = gestor.id_usuario
+            espacio_data['gestor_nombre'] = gestor.nombre
+            espacio_data['gestor_apellido'] = gestor.apellido
+        else:
+            espacio_data['gestor_id'] = None
+            espacio_data['gestor_nombre'] = None
+            espacio_data['gestor_apellido'] = None
+            
+        lista_final.append(espacio_data)
+    
+    return lista_final
 
 @router.get("/{espacio_id}", response_model=EspacioDeportivoResponse)
 def get_espacio(espacio_id: int, db: Session = Depends(get_db)):
@@ -82,7 +126,7 @@ async def create_espacio(
     ubicacion: str = Form(...),
     capacidad: int = Form(...),
     descripcion: Optional[str] = Form(None),
-    gestor_id: Optional[int] = Form(None),  # NUEVO: ID del gestor a asignar
+    gestor_id: Optional[int] = Form(None),
     latitud: float = Form(None),
     longitud: float = Form(None),
     imagen: Optional[UploadFile] = File(None),
@@ -158,9 +202,17 @@ async def update_espacio(
     longitud: Optional[float] = Form(None),
     gestor_id: Optional[int] = Form(None),
     imagen: Optional[UploadFile] = File(None),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user)
 ):
-    """Actualizar espacio deportivo con imagen"""
+    """Actualizar espacio deportivo con imagen - SOLO ADMIN"""
+    
+    if current_user.rol != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo los administradores pueden actualizar espacios deportivos"
+        )
+    
     espacio = db.query(EspacioDeportivo).filter(EspacioDeportivo.id_espacio_deportivo == espacio_id).first()
     if not espacio:
         raise HTTPException(status_code=404, detail="Espacio deportivo no encontrado")
@@ -187,6 +239,7 @@ async def update_espacio(
         espacio.latitud = latitud
     if longitud is not None:
         espacio.longitud = longitud
+    
     # Procesar nueva imagen si se proporciona
     if imagen and imagen.size > 0:
         if imagen.size > MAX_FILE_SIZE:
@@ -201,14 +254,14 @@ async def update_espacio(
         # Guardar nueva imagen
         espacio.imagen = save_uploaded_file(imagen)
 
-    if gestor_id is not None: # Si se envió un valor (incluso vacío para desasignar)
+    if gestor_id is not None:
         # 1. Eliminar asignaciones previas para este espacio
         db.query(Administra).filter(
             Administra.id_espacio_deportivo == espacio_id
         ).delete()
         
         # 2. Crear la nueva si no es vacío
-        if gestor_id > 0: # Asumiendo que envías un ID válido
+        if gestor_id > 0:
             nuevo_admin = Administra(
                 id_usuario=gestor_id,
                 id_espacio_deportivo=espacio_id
@@ -220,8 +273,19 @@ async def update_espacio(
     return espacio
 
 @router.delete("/{espacio_id}")
-def desactivar_espacio(espacio_id: int, db: Session = Depends(get_db)):
-    """Desactivar espacio deportivo (borrado lógico)"""
+def desactivar_espacio(
+    espacio_id: int, 
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user)
+):
+    """Desactivar espacio deportivo (borrado lógico) - SOLO ADMIN"""
+    
+    if current_user.rol != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo los administradores pueden desactivar espacios deportivos"
+        )
+    
     espacio = db.query(EspacioDeportivo).filter(EspacioDeportivo.id_espacio_deportivo == espacio_id).first()
     if not espacio:
         raise HTTPException(status_code=404, detail="Espacio deportivo no encontrado")
@@ -235,8 +299,19 @@ def desactivar_espacio(espacio_id: int, db: Session = Depends(get_db)):
     return {"detail": "Espacio deportivo desactivado exitosamente"}
 
 @router.put("/{espacio_id}/activar")
-def activar_espacio(espacio_id: int, db: Session = Depends(get_db)):
-    """Reactivar un espacio deportivo previamente desactivado"""
+def activar_espacio(
+    espacio_id: int, 
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user)
+):
+    """Reactivar un espacio deportivo - SOLO ADMIN"""
+    
+    if current_user.rol != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo los administradores pueden activar espacios deportivos"
+        )
+    
     espacio = db.query(EspacioDeportivo).filter(EspacioDeportivo.id_espacio_deportivo == espacio_id).first()
     if not espacio:
         raise HTTPException(status_code=404, detail="Espacio deportivo no encontrado")
@@ -248,15 +323,6 @@ def activar_espacio(espacio_id: int, db: Session = Depends(get_db)):
     db.commit()
     
     return {"detail": "Espacio deportivo activado exitosamente"}
-
-
-
-@router.get("/", response_model=list[EspacioDeportivoResponse])
-def list_espacios(include_inactive: bool = False, db: Session = Depends(get_db)):
-    query = db.query(EspacioDeportivo)
-    if not include_inactive:
-        query = query.filter(EspacioDeportivo.estado == "activo")
-    return query.order_by(EspacioDeportivo.fecha_creacion.desc()).all()
 
 @router.get("/nearby")
 def get_espacios_cercanos(lat: float, lon: float, radius_km: float = 5.0, db: Session = Depends(get_db)):
@@ -284,220 +350,6 @@ def get_espacios_cercanos(lat: float, lon: float, radius_km: float = 5.0, db: Se
     rows = [dict(r) for r in result]
     return rows
 
-
-@router.get("/gestor/mis-espacios", response_model=list[EspacioDeportivoResponse])
-def get_espacios_gestor(
-    include_inactive: bool = False,
-    db: Session = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user)
-):
-    """Obtener espacios deportivos según el rol del usuario"""
-    
-    if current_user.rol == "admin":
-        query = db.query(EspacioDeportivo)
-        if not include_inactive:
-            query = query.filter(EspacioDeportivo.estado == "activo")
-        espacios = query.all()
-        return espacios
-    
-    elif current_user.rol == "gestor":
-        query = db.query(EspacioDeportivo).join(
-            Administra, 
-            EspacioDeportivo.id_espacio_deportivo == Administra.id_espacio_deportivo
-        ).filter(
-            Administra.id_usuario == current_user.id_usuario
-        )
-        
-        if not include_inactive:
-            query = query.filter(EspacioDeportivo.estado == "activo")
-        
-        espacios = query.all()
-        return espacios
-    
-    elif current_user.rol == "control_acceso":
-        query = db.query(EspacioDeportivo).join(
-            Administra, 
-            EspacioDeportivo.id_espacio_deportivo == Administra.id_espacio_deportivo
-        ).filter(
-            Administra.id_usuario == current_user.id_usuario
-        )
-        
-        if not include_inactive:
-            query = query.filter(EspacioDeportivo.estado == "activo")
-        
-        espacios = query.all()
-        return espacios
-    
-    else:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="No tienes permisos para acceder a estos espacios"
-        )
-    
-
-
-
-@router.get("/admin/todos-espacios", response_model=list[EspacioDeportivoResponse])
-def get_todos_espacios_admin(
-    include_inactive: bool = False,
-    db: Session = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user)
-):
-    """Endpoint admin: Cruza Espacios con Usuarios a través de la tabla Administra"""
-    if current_user.rol != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Solo los administradores pueden acceder a este endpoint"
-        )
-    
-    # AQUÍ ESTÁ EL "CRUCE" (JOIN)
-    # 1. Seleccionamos EspacioDeportivo Y Usuario
-    # 2. Unimos con la tabla intermedia 'Administra'
-    # 3. Unimos con la tabla 'Usuario' para sacar el nombre
-    query = db.query(EspacioDeportivo, Usuario)\
-        .outerjoin(Administra, EspacioDeportivo.id_espacio_deportivo == Administra.id_espacio_deportivo)\
-        .outerjoin(Usuario, Administra.id_usuario == Usuario.id_usuario)
-    
-    if not include_inactive:
-        query = query.filter(EspacioDeportivo.estado == "activo")
-    
-    results = query.all()
-
-    # Procesamos los resultados para combinarlos en un solo objeto
-    lista_final = []
-    for espacio, gestor in results:
-        # Convertimos el espacio a diccionario para poder agregarle campos extra
-        espacio_data = espacio.__dict__
-        
-        if gestor:
-            # Si el cruce encontró un gestor, agregamos sus datos
-            espacio_data['gestor_id'] = gestor.id_usuario
-            espacio_data['gestor_nombre'] = gestor.nombre
-            espacio_data['gestor_apellido'] = gestor.apellido
-        else:
-            # Si no hay gestor (el cruce no trajo nada), enviamos null
-            espacio_data['gestor_id'] = None
-            espacio_data['gestor_nombre'] = None
-            espacio_data['gestor_apellido'] = None
-            
-        lista_final.append(espacio_data)
-    
-    return lista_final
-
-
-@router.post("/{usuario_id}/asignar-espacio/{espacio_id}")
-def asignar_espacio_gestor(
-    usuario_id: int,
-    espacio_id: int,
-    db: Session = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user)
-):
-    """Asignar un espacio deportivo a un gestor (solo admin puede hacer esto)"""
-    if current_user.rol != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Solo los administradores pueden asignar espacios"
-        )
-    
-    usuario_gestor = db.query(Usuario).filter(Usuario.id_usuario == usuario_id).first()
-    if not usuario_gestor or usuario_gestor.rol != "gestor":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="El usuario debe ser un gestor"
-        )
-    
-    espacio = db.query(EspacioDeportivo).filter(EspacioDeportivo.id_espacio_deportivo == espacio_id).first()
-    if not espacio:
-        raise HTTPException(status_code=404, detail="Espacio deportivo no encontrado")
-    
-    existing_asignacion = db.query(Administra).filter(
-        Administra.id_usuario == usuario_id,
-        Administra.id_espacio_deportivo == espacio_id
-    ).first()
-    
-    if existing_asignacion:
-        raise HTTPException(
-            status_code=400,
-            detail="Este gestor ya administra este espacio"
-        )
-    
-    nueva_asignacion = Administra(
-        id_usuario=usuario_id,
-        id_espacio_deportivo=espacio_id
-    )
-    
-    db.add(nueva_asignacion)
-    db.commit()
-    
-    return {"detail": "Espacio asignado exitosamente al gestor"}
-
-@router.delete("/{usuario_id}/remover-espacio/{espacio_id}")
-def remover_espacio_gestor(
-    usuario_id: int,
-    espacio_id: int,
-    db: Session = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user)
-):
-    """Remover un espacio deportivo de un gestor (solo admin)"""
-    if current_user.rol != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Solo los administradores pueden remover espacios"
-        )
-    
-    asignacion = db.query(Administra).filter(
-        Administra.id_usuario == usuario_id,
-        Administra.id_espacio_deportivo == espacio_id
-    ).first()
-    
-    if not asignacion:
-        raise HTTPException(
-            status_code=404,
-            detail="No se encontró la asignación de este espacio al gestor"
-        )
-    
-    db.delete(asignacion)
-    db.commit()
-    
-    return {"detail": "Espacio removido exitosamente del gestor"}
-
-@router.get("/{usuario_id}/espacios", response_model=list[EspacioDeportivoResponse])
-def get_espacios_por_gestor(
-    usuario_id: int,
-    include_inactive: bool = False,
-    db: Session = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user)
-):
-    """Obtener espacios administrados por un gestor específico (para admin)"""
-    if current_user.rol != "admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Solo los administradores pueden ver espacios de otros gestores"
-        )
-    
-    usuario_gestor = db.query(Usuario).filter(Usuario.id_usuario == usuario_id).first()
-    if not usuario_gestor:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    
-    if usuario_gestor.rol != "gestor":
-        raise HTTPException(
-            status_code=400,
-            detail="El usuario especificado no es un gestor"
-        )
-    
-    query = db.query(EspacioDeportivo).join(
-        Administra, 
-        EspacioDeportivo.id_espacio_deportivo == Administra.id_espacio_deportivo
-    ).filter(
-        Administra.id_usuario == usuario_id
-    )
-    
-    if not include_inactive:
-        query = query.filter(EspacioDeportivo.estado == "activo")
-    
-    espacios = query.all()
-    return espacios
-
 @router.get("/public/disponibles", response_model=list[EspacioDeportivoResponse])
 def get_espacios_disponibles(db: Session = Depends(get_db)):
     """Obtener espacios deportivos disponibles (público para reservas)"""
@@ -519,7 +371,7 @@ def get_gestores_disponibles(
     db: Session = Depends(get_db),
     current_user: Usuario = Depends(get_current_user)
 ):
-    """Obtener lista de gestores disponibles para asignar espacios"""
+    """Obtener lista de gestores disponibles para asignar espacios - SOLO ADMIN"""
     
     if current_user.rol != "admin":
         raise HTTPException(
@@ -551,7 +403,7 @@ def asignar_gestor_espacio(
     db: Session = Depends(get_db),
     current_user: Usuario = Depends(get_current_user)
 ):
-    """Asignar un gestor a un espacio deportivo"""
+    """Asignar un gestor a un espacio deportivo - SOLO ADMIN"""
     
     if current_user.rol != "admin":
         raise HTTPException(
@@ -611,7 +463,7 @@ def get_gestor_asignado(
     db: Session = Depends(get_db),
     current_user: Usuario = Depends(get_current_user)
 ):
-    """Obtener el gestor asignado a un espacio deportivo"""
+    """Obtener el gestor asignado a un espacio deportivo - SOLO ADMIN"""
     if current_user.rol != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

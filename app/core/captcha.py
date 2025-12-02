@@ -1,6 +1,5 @@
-# app/core/captcha.py
 import requests
-from app.config import settings  # Importar desde la nueva configuración
+from app.config import settings
 
 def verificar_captcha(token: str) -> bool:
     """

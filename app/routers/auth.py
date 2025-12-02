@@ -42,7 +42,6 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
         }
     }
 
-# En tu router de auth (donde está el /register)
 @router.post("/register")
 def register(usuario_data: Register, db: Session = Depends(get_db)):
     """
