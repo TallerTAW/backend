@@ -29,3 +29,4 @@ class Reserva(Base):
     cancelacion = relationship("Cancelacion", back_populates="reserva", uselist=False)
     incidente = relationship("Incidente", back_populates="reserva", uselist=False)
     cupon = relationship("Cupon", back_populates="reserva", uselist=False)
+    asistentes = relationship("AsistenteReserva", back_populates="reserva", cascade="all, delete-orphan")

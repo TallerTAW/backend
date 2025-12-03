@@ -2,6 +2,8 @@ from pydantic import BaseModel, Field, validator
 from typing import Optional
 from datetime import date, time, datetime
 from decimal import Decimal
+from .asistente import AsistenteCreate, AsistenteResponse
+from typing import List
 
 class ReservaBase(BaseModel):
     fecha_reserva: date
@@ -25,6 +27,16 @@ class ReservaCreate(ReservaBase):
     💡 CAMBIO: Agregar campo opcional para código de cupón
     """
     codigo_cupon: Optional[str] = Field(None, description="Código de cupón a aplicar")
+    id_usuario: int
+    id_cancha: int
+    id_disciplina: int
+    fecha_reserva: date
+    hora_inicio: time
+    hora_fin: time
+    cantidad_asistentes: int
+    material_prestado: Optional[str] = None
+    
+    asistentes: List[AsistenteCreate] = []
 
 class ReservaUpdate(BaseModel):
     fecha_reserva: Optional[date] = None
@@ -46,6 +58,7 @@ class ReservaResponse(ReservaBase):
     costo_total: Decimal
     qr_code: Optional[str] = None 
     fecha_creacion: datetime
+    asistentes: List[AsistenteResponse] = []
     
     class Config:
         from_attributes = True

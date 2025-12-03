@@ -2,7 +2,7 @@
 # 🎯 PROPÓSITO: Endpoint completo de reservas con integración de cupones y todas las funciones
 # 💡 VERSIÓN FUSIONADA: Combina reservas_opcion.py original con reservas.py básico
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_, or_
 from datetime import datetime, date, time
@@ -15,9 +15,15 @@ from app.models.disciplina import Disciplina
 from app.models.cupon import Cupon
 from app.schemas.reserva import ReservaResponse, ReservaCreate, ReservaUpdate
 from app.models.administra import Administra
+from app.models.asistente import AsistenteReserva
+from app.schemas.asistente import AsistenteCreate
+from app.core.email_service import send_qr_email
 import random
 import string
 from sqlalchemy import text
+import uuid
+import secrets
+
 
 router = APIRouter()
 
@@ -250,6 +256,244 @@ def cancelar_reserva(reserva_id: int, motivo: str = None, db: Session = Depends(
         )
 
 # ========== ENDPOINTS COMPLETOS CON CUPONES (del archivo reservas_opcion.py original) ==========
+
+def generar_codigo_qr():
+    """Genera un código único para el QR"""
+    return f"QR-{uuid.uuid4().hex[:12].upper()}"
+
+def generar_token_verificacion():
+    """Genera un token seguro para verificación"""
+    return secrets.token_urlsafe(32)
+
+@router.post("/crear-con-asistentes", response_model=ReservaResponse)
+def crear_reserva_con_asistentes(
+    reserva_data: ReservaCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    """
+    🎯 CREAR RESERVA CON ASISTENTES Y ENVIAR CÓDIGOS QR POR EMAIL
+    💡 CARACTERÍSTICAS:
+      - Crea la reserva normal
+      - Registra cada asistente
+      - Genera QR único para cada asistente
+      - Envía email con QR a cada asistente
+      - Valida que cantidad_asistentes coincida con lista
+    """
+    print(f"🎯 [BACKEND] Creando reserva con {len(reserva_data.asistentes)} asistentes")
+    
+    # ✅ VALIDACIÓN: Solo horas completas
+    if reserva_data.hora_inicio.minute != 0 or reserva_data.hora_fin.minute != 0:
+        raise HTTPException(
+            status_code=400, 
+            detail="Las reservas solo pueden hacerse en horas completas"
+        )
+    
+    # ✅ VALIDACIÓN: Cantidad de asistentes debe coincidir
+    if reserva_data.cantidad_asistentes != len(reserva_data.asistentes):
+        raise HTTPException(
+            status_code=400,
+            detail=f"La cantidad de asistentes ({reserva_data.cantidad_asistentes}) no coincide con la lista proporcionada ({len(reserva_data.asistentes)})"
+        )
+    
+    # ✅ VALIDACIÓN: No más asistentes que capacidad máxima (agregar si tienes ese dato)
+    
+    # Verificar que la cancha existe
+    cancha = db.query(Cancha).filter(Cancha.id_cancha == reserva_data.id_cancha).first()
+    if not cancha:
+        raise HTTPException(status_code=404, detail="Cancha no encontrada")
+    
+    if cancha.estado != 'disponible':
+        raise HTTPException(status_code=400, detail="La cancha no está disponible")
+    
+    cancha_nombre = cancha.nombre
+    print(f"🏟️ [BACKEND] Cancha encontrada: {cancha.nombre} (ID: {cancha.id_cancha})")
+    
+    # Verificar usuario
+    usuario = db.query(Usuario).filter(Usuario.id_usuario == reserva_data.id_usuario).first()
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    
+    # VERIFICAR DISPONIBILIDAD
+    try:
+        result = db.execute(
+            text("SELECT verificar_disponibilidad(:cancha_id, :fecha, :hora_inicio, :hora_fin) as disponible"),
+            {
+                "cancha_id": reserva_data.id_cancha,
+                "fecha": reserva_data.fecha_reserva,
+                "hora_inicio": reserva_data.hora_inicio,
+                "hora_fin": reserva_data.hora_fin
+            }
+        )
+        
+        disponible = result.scalar()
+        
+        if not disponible:
+            raise HTTPException(
+                status_code=400, 
+                detail="La cancha no está disponible en el horario solicitado"
+            )
+            
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al verificar disponibilidad: {str(e)}"
+        )
+    
+    # Calcular costo total inicial
+    costo_total = calcular_costo_total(
+        reserva_data.hora_inicio, reserva_data.hora_fin, float(cancha.precio_por_hora)
+    )
+    
+    # Generar código único de reserva
+    codigo_reserva = generar_codigo_unico_reserva(db)
+    
+    if not codigo_reserva:
+        codigo_reserva = f"RES-{int(datetime.now().timestamp())}"
+    
+    print(f"✅ [BACKEND] Código reserva: {codigo_reserva}")
+    print(f"💰 [BACKEND] Costo inicial: ${costo_total}")
+    
+    # Extraer código cupón
+    reserva_dict = reserva_data.dict()
+    asistentes_data = reserva_dict.pop('asistentes', [])
+    codigo_cupon = reserva_dict.pop('codigo_cupon', None)
+    
+    # Crear la reserva
+    nueva_reserva = Reserva(
+        **reserva_dict,
+        costo_total=costo_total,
+        codigo_reserva=codigo_reserva,
+        estado="pendiente"
+    )
+    
+    try:
+        db.add(nueva_reserva)
+        db.commit()
+        db.refresh(nueva_reserva)
+        
+        print(f"✅ [BACKEND] Reserva {nueva_reserva.id_reserva} creada")
+        
+        # ✅ APLICAR CUPÓN SI EXISTE
+        cupon_aplicado = False
+        if codigo_cupon:
+            try:
+                cupon = db.query(Cupon).filter(Cupon.codigo == codigo_cupon).first()
+                if cupon and cupon.estado == "activo":
+                    if cupon.tipo == "porcentaje":
+                        descuento = (costo_total * float(cupon.monto_descuento)) / 100
+                    else:
+                        descuento = float(cupon.monto_descuento)
+                    
+                    if descuento > costo_total:
+                        descuento = costo_total
+                    
+                    nuevo_costo = costo_total - descuento
+                    nueva_reserva.costo_total = nuevo_costo
+                    cupon.id_reserva = nueva_reserva.id_reserva
+                    cupon.estado = "utilizado"
+                    cupon_aplicado = True
+                    
+            except Exception as cupon_error:
+                print(f"⚠️ [BACKEND] Error aplicando cupón: {str(cupon_error)}")
+        
+        # ✅ CREAR ASISTENTES Y GENERAR QR PARA CADA UNO
+        asistentes_creados = []
+        for asistente_data in asistentes_data:
+            # Generar código QR único y token
+            codigo_qr = generar_codigo_qr()
+            token_verificacion = generar_token_verificacion()
+            
+            # Crear asistente
+            asistente = AsistenteReserva(
+                id_reserva=nueva_reserva.id_reserva,
+                nombre=asistente_data["nombre"],
+                email=asistente_data["email"],
+                codigo_qr=codigo_qr,
+                token_verificacion=token_verificacion,
+                asistio=False
+            )
+            
+            db.add(asistente)
+            asistentes_creados.append(asistente)
+            
+            print(f"✅ [BACKEND] Asistente creado: {asistente.nombre} ({asistente.email})")
+        
+        db.commit()
+        
+        # ✅ ENVIAR EMAILS CON QR EN BACKGROUND
+        for asistente in asistentes_creados:
+            background_tasks.add_task(
+                enviar_email_con_qr_asincrono,
+                asistente=asistente,
+                reserva=nueva_reserva,
+                cancha_nombre=cancha_nombre,
+                usuario=usuario
+            )
+        
+        # Recargar con relaciones
+        reserva_final = db.query(Reserva).options(
+            joinedload(Reserva.usuario),
+            joinedload(Reserva.cancha).joinedload(Cancha.espacio_deportivo),
+            joinedload(Reserva.disciplina),
+            joinedload(Reserva.asistentes)
+        ).filter(Reserva.id_reserva == nueva_reserva.id_reserva).first()
+        
+        print(f"🎉 [BACKEND] Reserva con asistentes creada exitosamente: {nueva_reserva.id_reserva}")
+        
+        return reserva_final
+        
+    except Exception as e:
+        db.rollback()
+        print(f"❌ [BACKEND] Error al crear reserva con asistentes: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al crear reserva: {str(e)}"
+        )
+
+def enviar_email_con_qr_asincrono(asistente: AsistenteReserva, reserva: Reserva, cancha_nombre:str, usuario: Usuario):
+    """
+    Función asíncrona para enviar email con QR
+    """
+    try:
+        # Importar aquí para evitar problemas de importación circular
+        from app.core.email_service import send_qr_email_with_attachment  # O send_qr_email
+        
+        # Datos para el email
+        datos_email = {
+            "nombre_asistente": asistente.nombre,
+            "email_asistente": asistente.email,
+            "nombre_reservante": usuario.nombre,
+            "nombre_cancha": cancha_nombre,
+            "fecha_reserva": reserva.fecha_reserva.strftime("%d/%m/%Y"),
+            "hora_inicio": reserva.hora_inicio.strftime("%H:%M"),
+            "hora_fin": reserva.hora_fin.strftime("%H:%M"),
+            "codigo_reserva": reserva.codigo_reserva,
+            "codigo_qr": asistente.codigo_qr,
+            "token_verificacion": asistente.token_verificacion
+        }
+        
+        # Prueba con attachment primero (más confiable)
+        enviado = send_qr_email_with_attachment(
+            to_email=asistente.email,
+            datos=datos_email
+        )
+        
+        # Si falla, intenta con la versión normal
+        if not enviado:
+            print(f"⚠️ Attachment falló, intentando método normal...")
+            from app.core.email_service import send_qr_email
+            enviado = send_qr_email(asistente.email, datos_email)
+        
+        if enviado:
+            print(f"✅ [EMAIL] QR enviado a {asistente.email}")
+        else:
+            print(f"❌ [EMAIL] Error al enviar QR a {asistente.email}")
+            
+    except Exception as e:
+        print(f"❌ [EMAIL] Error en envío de email: {str(e)}")
 
 @router.post("/", response_model=ReservaResponse)
 def create_reserva(reserva_data: ReservaCreate, db: Session = Depends(get_db)):
