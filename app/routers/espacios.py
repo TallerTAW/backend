@@ -9,8 +9,9 @@ from app.core.security import get_current_user
 import uuid
 import os
 import shutil
-from typing import Optional
-from sqlalchemy import text
+from typing import Optional, List
+from sqlalchemy import text, or_
+from datetime import datetime
 
 # Configuración para uploads
 UPLOAD_DIR = "static/uploads/espacios"
@@ -28,12 +29,10 @@ def save_uploaded_file(file: UploadFile) -> str:
     if not allowed_file(file.filename):
         raise HTTPException(status_code=400, detail="Tipo de archivo no permitido")
     
-    # Generar nombre único
     file_extension = file.filename.rsplit('.', 1)[1].lower()
     unique_filename = f"{uuid.uuid4().hex}.{file_extension}"
     file_path = os.path.join(UPLOAD_DIR, unique_filename)
     
-    # Guardar archivo
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
     
@@ -49,76 +48,133 @@ def get_espacios(
 ):
     """
     Obtener espacios deportivos según el rol del usuario
-    - Admin: ve todos los espacios con información del gestor
+    - Admin: ve todos los espacios con información del gestor y control de acceso
     - Gestor/Control: ve solo los espacios que administra
     """
     
     if current_user.rol == "admin":
-        # Admin ve todos los espacios con la información del gestor
-        query = db.query(EspacioDeportivo, Usuario)\
-            .outerjoin(Administra, EspacioDeportivo.id_espacio_deportivo == Administra.id_espacio_deportivo)\
-            .outerjoin(Usuario, Administra.id_usuario == Usuario.id_usuario)
+        # Admin ve todos los espacios
+        espacios = db.query(EspacioDeportivo).all()
     elif current_user.rol in ["gestor", "control_acceso"]:
-        # Gestor o control_acceso ve solo los espacios que administra
-        query = db.query(EspacioDeportivo, Usuario)\
+        # Gestor o control_acceso ve solo los espacios donde está asignado
+        espacios = db.query(EspacioDeportivo)\
             .join(Administra, EspacioDeportivo.id_espacio_deportivo == Administra.id_espacio_deportivo)\
-            .join(Usuario, Administra.id_usuario == Usuario.id_usuario)\
-            .filter(Administra.id_usuario == current_user.id_usuario)
+            .filter(Administra.id_usuario == current_user.id_usuario)\
+            .all()
     else:
-        # Cliente o otros roles no deberían acceder aquí, pero por si acaso
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="No tienes permisos para acceder a estos espacios"
         )
     
     if not include_inactive:
-        query = query.filter(EspacioDeportivo.estado == "activo")
+        espacios = [e for e in espacios if e.estado == "activo"]
     
-    results = query.all()
-    
-    # Procesamos los resultados
-    lista_final = []
-    for espacio, gestor in results:
-        espacio_data = espacio.__dict__
+    # Enriquecer cada espacio con información de asignaciones
+    espacios_enriquecidos = []
+    for espacio in espacios:
+        # Obtener todos los usuarios asignados a este espacio
+        usuarios_asignados = db.query(Usuario)\
+            .join(Administra, Usuario.id_usuario == Administra.id_usuario)\
+            .filter(Administra.id_espacio_deportivo == espacio.id_espacio_deportivo)\
+            .all()
         
-        if gestor:
-            espacio_data['gestor_id'] = gestor.id_usuario
-            espacio_data['gestor_nombre'] = gestor.nombre
-            espacio_data['gestor_apellido'] = gestor.apellido
-        else:
-            espacio_data['gestor_id'] = None
-            espacio_data['gestor_nombre'] = None
-            espacio_data['gestor_apellido'] = None
-            
-        lista_final.append(espacio_data)
+        # Separar por rol
+        gestor_info = None
+        control_info = None
+        
+        for usuario in usuarios_asignados:
+            if usuario.rol == "gestor":
+                gestor_info = usuario
+            elif usuario.rol == "control_acceso":
+                control_info = usuario
+        
+        espacio_dict = {
+            "id_espacio_deportivo": espacio.id_espacio_deportivo,
+            "nombre": espacio.nombre,
+            "ubicacion": espacio.ubicacion,
+            "capacidad": espacio.capacidad,
+            "descripcion": espacio.descripcion,
+            "imagen": espacio.imagen,
+            "estado": espacio.estado,
+            "latitud": espacio.latitud,
+            "longitud": espacio.longitud,
+            "fecha_creacion": espacio.fecha_creacion,
+            "gestor_id": gestor_info.id_usuario if gestor_info else None,
+            "gestor_nombre": gestor_info.nombre if gestor_info else None,
+            "gestor_apellido": gestor_info.apellido if gestor_info else None,
+            "control_acceso_id": control_info.id_usuario if control_info else None,
+            "control_acceso_nombre": control_info.nombre if control_info else None,
+            "control_acceso_apellido": control_info.apellido if control_info else None,
+        }
+        
+        espacios_enriquecidos.append(espacio_dict)
     
-    return lista_final
+    return espacios_enriquecidos
 
 @router.get("/{espacio_id}", response_model=EspacioDeportivoResponse)
-def get_espacio(espacio_id: int, db: Session = Depends(get_db)):
-    # Buscamos espacio y usuario en la misma consulta
-    resultado = db.query(EspacioDeportivo, Usuario)\
-        .outerjoin(Administra, EspacioDeportivo.id_espacio_deportivo == Administra.id_espacio_deportivo)\
-        .outerjoin(Usuario, Administra.id_usuario == Usuario.id_usuario)\
-        .filter(EspacioDeportivo.id_espacio_deportivo == espacio_id)\
-        .first()
-
-    if not resultado:
+def get_espacio(
+    espacio_id: int, 
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user)
+):
+    """Obtener un espacio específico con información de asignaciones"""
+    
+    espacio = db.query(EspacioDeportivo).filter(EspacioDeportivo.id_espacio_deportivo == espacio_id).first()
+    
+    if not espacio:
         raise HTTPException(status_code=404, detail="Espacio deportivo no encontrado")
     
-    espacio, gestor = resultado
-    espacio_dict = espacio.__dict__
-
-    if gestor:
-        espacio_dict['gestor_id'] = gestor.id_usuario
-        espacio_dict['gestor_nombre'] = gestor.nombre
-        espacio_dict['gestor_apellido'] = gestor.apellido
-    else:
-        espacio_dict['gestor_id'] = None
-        espacio_dict['gestor_nombre'] = None
-        espacio_dict['gestor_apellido'] = None
-
-    return espacio_dict
+    # Verificar permisos si no es admin
+    if current_user.rol not in ["admin"] and current_user.rol in ["gestor", "control_acceso"]:
+        # Verificar si el usuario está asignado a este espacio
+        asignacion = db.query(Administra).filter(
+            Administra.id_espacio_deportivo == espacio_id,
+            Administra.id_usuario == current_user.id_usuario
+        ).first()
+        
+        if not asignacion:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No tienes permisos para acceder a este espacio"
+            )
+    
+    # Obtener todos los usuarios asignados a este espacio
+    usuarios_asignados = db.query(Usuario)\
+        .join(Administra, Usuario.id_usuario == Administra.id_usuario)\
+        .filter(Administra.id_espacio_deportivo == espacio_id)\
+        .all()
+    
+    # Separar por rol
+    gestor_info = None
+    control_info = None
+    
+    for usuario in usuarios_asignados:
+        if usuario.rol == "gestor":
+            gestor_info = usuario
+        elif usuario.rol == "control_acceso":
+            control_info = usuario
+    
+    respuesta = {
+        "id_espacio_deportivo": espacio.id_espacio_deportivo,
+        "nombre": espacio.nombre,
+        "ubicacion": espacio.ubicacion,
+        "capacidad": espacio.capacidad,
+        "descripcion": espacio.descripcion,
+        "imagen": espacio.imagen,
+        "estado": espacio.estado,
+        "latitud": espacio.latitud,
+        "longitud": espacio.longitud,
+        "fecha_creacion": espacio.fecha_creacion,
+        "gestor_id": gestor_info.id_usuario if gestor_info else None,
+        "gestor_nombre": gestor_info.nombre if gestor_info else None,
+        "gestor_apellido": gestor_info.apellido if gestor_info else None,
+        "control_acceso_id": control_info.id_usuario if control_info else None,
+        "control_acceso_nombre": control_info.nombre if control_info else None,
+        "control_acceso_apellido": control_info.apellido if control_info else None,
+    }
+    
+    return respuesta
 
 @router.post("/", response_model=EspacioDeportivoResponse)
 async def create_espacio(
@@ -127,6 +183,7 @@ async def create_espacio(
     capacidad: int = Form(...),
     descripcion: Optional[str] = Form(None),
     gestor_id: Optional[int] = Form(None),
+    control_acceso_id: Optional[int] = Form(None),
     latitud: float = Form(None),
     longitud: float = Form(None),
     imagen: Optional[UploadFile] = File(None),
@@ -170,7 +227,7 @@ async def create_espacio(
         db.refresh(nuevo_espacio)
         
         # ASIGNAR GESTOR SI SE PROPORCIONÓ
-        if gestor_id:
+        if gestor_id and gestor_id > 0:
             gestor = db.query(Usuario).filter(
                 Usuario.id_usuario == gestor_id,
                 Usuario.rol == "gestor",
@@ -178,15 +235,63 @@ async def create_espacio(
             ).first()
             
             if gestor:
-                nueva_asignacion = Administra(
-                    id_espacio_deportivo=nuevo_espacio.id_espacio_deportivo,
-                    id_usuario=gestor_id
-                )
-                db.add(nueva_asignacion)
-                db.commit()
+                # Verificar que no haya ya un gestor asignado
+                gestor_existente = db.query(Administra)\
+                    .join(Usuario, Administra.id_usuario == Usuario.id_usuario)\
+                    .filter(
+                        Administra.id_espacio_deportivo == nuevo_espacio.id_espacio_deportivo,
+                        Usuario.rol == "gestor"
+                    ).first()
+                
+                if gestor_existente:
+                    # Actualizar la asignación existente
+                    gestor_existente.id_usuario = gestor_id
+                else:
+                    # Crear nueva asignación
+                    nueva_asignacion = Administra(
+                        id_espacio_deportivo=nuevo_espacio.id_espacio_deportivo,
+                        id_usuario=gestor_id,
+                        fecha_asignacion=datetime.now()
+                    )
+                    db.add(nueva_asignacion)
         
-        return nuevo_espacio
+        # ASIGNAR CONTROL DE ACCESO SI SE PROPORCIONÓ
+        if control_acceso_id and control_acceso_id > 0:
+            control = db.query(Usuario).filter(
+                Usuario.id_usuario == control_acceso_id,
+                Usuario.rol == "control_acceso",
+                Usuario.estado == "activo"
+            ).first()
+            
+            if control:
+                # Verificar que no haya ya un control asignado
+                control_existente = db.query(Administra)\
+                    .join(Usuario, Administra.id_usuario == Usuario.id_usuario)\
+                    .filter(
+                        Administra.id_espacio_deportivo == nuevo_espacio.id_espacio_deportivo,
+                        Usuario.rol == "control_acceso"
+                    ).first()
+                
+                if control_existente:
+                    # Actualizar la asignación existente
+                    control_existente.id_usuario = control_acceso_id
+                else:
+                    # Crear nueva asignación
+                    nueva_asignacion = Administra(
+                        id_espacio_deportivo=nuevo_espacio.id_espacio_deportivo,
+                        id_usuario=control_acceso_id,
+                        fecha_asignacion=datetime.now()
+                    )
+                    db.add(nueva_asignacion)
         
+        db.commit()
+        
+        # Retornar el espacio creado con información de asignaciones
+        return get_espacio(nuevo_espacio.id_espacio_deportivo, db, current_user)
+        
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
@@ -201,11 +306,12 @@ async def update_espacio(
     latitud: Optional[float] = Form(None),
     longitud: Optional[float] = Form(None),
     gestor_id: Optional[int] = Form(None),
+    control_acceso_id: Optional[int] = Form(None),
     imagen: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
     current_user: Usuario = Depends(get_current_user)
 ):
-    """Actualizar espacio deportivo con imagen - SOLO ADMIN"""
+    """Actualizar espacio deportivo - SOLO ADMIN"""
     
     if current_user.rol != "admin":
         raise HTTPException(
@@ -213,64 +319,136 @@ async def update_espacio(
             detail="Solo los administradores pueden actualizar espacios deportivos"
         )
     
-    espacio = db.query(EspacioDeportivo).filter(EspacioDeportivo.id_espacio_deportivo == espacio_id).first()
-    if not espacio:
-        raise HTTPException(status_code=404, detail="Espacio deportivo no encontrado")
-    
-    # Verificar nombre único si se está cambiando
-    if nombre and nombre != espacio.nombre:
-        existing_espacio = db.query(EspacioDeportivo).filter(
-            EspacioDeportivo.nombre == nombre,
-            EspacioDeportivo.id_espacio_deportivo != espacio_id
-        ).first()
-        if existing_espacio:
-            raise HTTPException(status_code=400, detail="Ya existe un espacio deportivo con ese nombre")
-    
-    # Actualizar campos
-    if nombre is not None:
-        espacio.nombre = nombre
-    if ubicacion is not None:
-        espacio.ubicacion = ubicacion
-    if capacidad is not None:
-        espacio.capacidad = capacidad
-    if descripcion is not None:
-        espacio.descripcion = descripcion
-    if latitud is not None:
-        espacio.latitud = latitud
-    if longitud is not None:
-        espacio.longitud = longitud
-    
-    # Procesar nueva imagen si se proporciona
-    if imagen and imagen.size > 0:
-        if imagen.size > MAX_FILE_SIZE:
-            raise HTTPException(status_code=400, detail="La imagen es demasiado grande (máximo 5MB)")
+    try:
+        espacio = db.query(EspacioDeportivo).filter(EspacioDeportivo.id_espacio_deportivo == espacio_id).first()
+        if not espacio:
+            raise HTTPException(status_code=404, detail="Espacio deportivo no encontrado")
         
-        # Eliminar imagen anterior si existe
-        if espacio.imagen:
-            old_image_path = espacio.imagen.lstrip('/')
-            if os.path.exists(old_image_path):
-                os.remove(old_image_path)
+        # Verificar nombre único si se está cambiando
+        if nombre and nombre != espacio.nombre:
+            existing_espacio = db.query(EspacioDeportivo).filter(
+                EspacioDeportivo.nombre == nombre,
+                EspacioDeportivo.id_espacio_deportivo != espacio_id
+            ).first()
+            if existing_espacio:
+                raise HTTPException(status_code=400, detail="Ya existe un espacio deportivo con ese nombre")
         
-        # Guardar nueva imagen
-        espacio.imagen = save_uploaded_file(imagen)
-
-    if gestor_id is not None:
-        # 1. Eliminar asignaciones previas para este espacio
-        db.query(Administra).filter(
-            Administra.id_espacio_deportivo == espacio_id
-        ).delete()
+        # Actualizar campos básicos
+        if nombre is not None:
+            espacio.nombre = nombre
+        if ubicacion is not None:
+            espacio.ubicacion = ubicacion
+        if capacidad is not None:
+            espacio.capacidad = capacidad
+        if descripcion is not None:
+            espacio.descripcion = descripcion
+        if latitud is not None:
+            espacio.latitud = latitud
+        if longitud is not None:
+            espacio.longitud = longitud
         
-        # 2. Crear la nueva si no es vacío
-        if gestor_id > 0:
-            nuevo_admin = Administra(
-                id_usuario=gestor_id,
-                id_espacio_deportivo=espacio_id
-            )
-            db.add(nuevo_admin)
-    
-    db.commit()
-    db.refresh(espacio)
-    return espacio
+        # Procesar nueva imagen si se proporciona
+        if imagen and imagen.size > 0:
+            if imagen.size > MAX_FILE_SIZE:
+                raise HTTPException(status_code=400, detail="La imagen es demasiado grande (máximo 5MB)")
+            
+            # Eliminar imagen anterior si existe
+            if espacio.imagen and espacio.imagen.startswith(f"/{UPLOAD_DIR}/"):
+                old_image_path = espacio.imagen.lstrip('/')
+                if os.path.exists(old_image_path):
+                    os.remove(old_image_path)
+            
+            # Guardar nueva imagen
+            espacio.imagen = save_uploaded_file(imagen)
+        
+        # GESTIÓN DE ASIGNACIONES DE GESTOR
+        if gestor_id is not None:
+            # Buscar gestor actual asignado
+            gestor_actual = db.query(Administra)\
+                .join(Usuario, Administra.id_usuario == Usuario.id_usuario)\
+                .filter(
+                    Administra.id_espacio_deportivo == espacio_id,
+                    Usuario.rol == "gestor"
+                ).first()
+            
+            if gestor_id and gestor_id > 0:
+                # Verificar que el usuario existe y es gestor
+                gestor = db.query(Usuario).filter(
+                    Usuario.id_usuario == gestor_id,
+                    Usuario.rol == "gestor",
+                    Usuario.estado == "activo"
+                ).first()
+                
+                if not gestor:
+                    raise HTTPException(status_code=400, detail="El gestor especificado no existe o no está activo")
+                
+                if gestor_actual:
+                    # Actualizar asignación existente
+                    gestor_actual.id_usuario = gestor_id
+                    gestor_actual.fecha_asignacion = datetime.now()
+                else:
+                    # Crear nueva asignación
+                    nueva_asignacion = Administra(
+                        id_espacio_deportivo=espacio_id,
+                        id_usuario=gestor_id,
+                        fecha_asignacion=datetime.now()
+                    )
+                    db.add(nueva_asignacion)
+            else:
+                # Eliminar asignación si se envía vacío
+                if gestor_actual:
+                    db.delete(gestor_actual)
+        
+        # GESTIÓN DE ASIGNACIONES DE CONTROL DE ACCESO
+        if control_acceso_id is not None:
+            # Buscar control actual asignado
+            control_actual = db.query(Administra)\
+                .join(Usuario, Administra.id_usuario == Usuario.id_usuario)\
+                .filter(
+                    Administra.id_espacio_deportivo == espacio_id,
+                    Usuario.rol == "control_acceso"
+                ).first()
+            
+            if control_acceso_id and control_acceso_id > 0:
+                # Verificar que el usuario existe y es control de acceso
+                control = db.query(Usuario).filter(
+                    Usuario.id_usuario == control_acceso_id,
+                    Usuario.rol == "control_acceso",
+                    Usuario.estado == "activo"
+                ).first()
+                
+                if not control:
+                    raise HTTPException(status_code=400, detail="El control de acceso especificado no existe o no está activo")
+                
+                if control_actual:
+                    # Actualizar asignación existente
+                    control_actual.id_usuario = control_acceso_id
+                    control_actual.fecha_asignacion = datetime.now()
+                else:
+                    # Crear nueva asignación
+                    nueva_asignacion = Administra(
+                        id_espacio_deportivo=espacio_id,
+                        id_usuario=control_acceso_id,
+                        fecha_asignacion=datetime.now()
+                    )
+                    db.add(nueva_asignacion)
+            else:
+                # Eliminar asignación si se envía vacío
+                if control_actual:
+                    db.delete(control_actual)
+        
+        db.commit()
+        db.refresh(espacio)
+        
+        # Retornar el espacio actualizado con información de asignaciones
+        return get_espacio(espacio_id, db, current_user)
+        
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
 
 @router.delete("/{espacio_id}")
 def desactivar_espacio(
@@ -325,12 +503,15 @@ def activar_espacio(
     return {"detail": "Espacio deportivo activado exitosamente"}
 
 @router.get("/nearby")
-def get_espacios_cercanos(lat: float, lon: float, radius_km: float = 5.0, db: Session = Depends(get_db)):
+def get_espacios_cercanos(
+    lat: float, 
+    lon: float, 
+    radius_km: float = 5.0, 
+    db: Session = Depends(get_db)
+):
     """
     Devuelve espacios dentro de radius_km kilómetros del punto (lat, lon).
-    Retorna cada fila con un campo distance_km.
     """
-    # Haversine implementado en SQL (Postgres)
     sql = text("""
       SELECT id_espacio_deportivo, nombre, ubicacion, capacidad, descripcion, imagen, latitud, longitud,
       (6371 * acos(
@@ -353,7 +534,29 @@ def get_espacios_cercanos(lat: float, lon: float, radius_km: float = 5.0, db: Se
 @router.get("/public/disponibles", response_model=list[EspacioDeportivoResponse])
 def get_espacios_disponibles(db: Session = Depends(get_db)):
     """Obtener espacios deportivos disponibles (público para reservas)"""
-    return db.query(EspacioDeportivo).filter(EspacioDeportivo.estado == "activo").all()
+    espacios = db.query(EspacioDeportivo).filter(EspacioDeportivo.estado == "activo").all()
+    
+    return [
+        {
+            "id_espacio_deportivo": espacio.id_espacio_deportivo,
+            "nombre": espacio.nombre,
+            "ubicacion": espacio.ubicacion,
+            "capacidad": espacio.capacidad,
+            "descripcion": espacio.descripcion,
+            "imagen": espacio.imagen,
+            "estado": espacio.estado,
+            "latitud": espacio.latitud,
+            "longitud": espacio.longitud,
+            "fecha_creacion": espacio.fecha_creacion,
+            "gestor_id": None,
+            "gestor_nombre": None,
+            "gestor_apellido": None,
+            "control_acceso_id": None,
+            "control_acceso_nombre": None,
+            "control_acceso_apellido": None,
+        }
+        for espacio in espacios
+    ]
 
 @router.get("/public/{espacio_id}", response_model=EspacioDeportivoResponse)
 def get_espacio_public(espacio_id: int, db: Session = Depends(get_db)):
@@ -362,9 +565,28 @@ def get_espacio_public(espacio_id: int, db: Session = Depends(get_db)):
         EspacioDeportivo.id_espacio_deportivo == espacio_id,
         EspacioDeportivo.estado == "activo"
     ).first()
+    
     if not espacio:
         raise HTTPException(status_code=404, detail="Espacio deportivo no encontrado")
-    return espacio
+    
+    return {
+        "id_espacio_deportivo": espacio.id_espacio_deportivo,
+        "nombre": espacio.nombre,
+        "ubicacion": espacio.ubicacion,
+        "capacidad": espacio.capacidad,
+        "descripcion": espacio.descripcion,
+        "imagen": espacio.imagen,
+        "estado": espacio.estado,
+        "latitud": espacio.latitud,
+        "longitud": espacio.longitud,
+        "fecha_creacion": espacio.fecha_creacion,
+        "gestor_id": None,
+        "gestor_nombre": None,
+        "gestor_apellido": None,
+        "control_acceso_id": None,
+        "control_acceso_nombre": None,
+        "control_acceso_apellido": None,
+    }
 
 @router.get("/gestores/disponibles")
 def get_gestores_disponibles(
@@ -379,7 +601,6 @@ def get_gestores_disponibles(
             detail="Solo los administradores pueden ver los gestores"
         )
     
-    # Obtener todos los usuarios con rol "gestor" y estado "activo"
     gestores = db.query(Usuario).filter(
         Usuario.rol == "gestor",
         Usuario.estado == "activo"
@@ -394,6 +615,35 @@ def get_gestores_disponibles(
             "telefono": gestor.telefono
         }
         for gestor in gestores
+    ]
+
+@router.get("/controles-acceso/disponibles")
+def get_controles_acceso_disponibles(
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user)
+):
+    """Obtener lista de controles de acceso disponibles para asignar espacios - SOLO ADMIN"""
+    
+    if current_user.rol != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo los administradores pueden ver los controles de acceso"
+        )
+    
+    controles = db.query(Usuario).filter(
+        Usuario.rol == "control_acceso",
+        Usuario.estado == "activo"
+    ).all()
+    
+    return [
+        {
+            "id_usuario": control.id_usuario,
+            "nombre": control.nombre,
+            "apellido": control.apellido,
+            "email": control.email,
+            "telefono": control.telefono
+        }
+        for control in controles
     ]
 
 @router.post("/{espacio_id}/asignar-gestor/{gestor_id}")
@@ -426,25 +676,27 @@ def asignar_gestor_espacio(
     if not gestor:
         raise HTTPException(status_code=404, detail="Gestor no encontrado o no está activo")
     
-    # Verificar si ya existe la asignación
-    existing_asignacion = db.query(Administra).filter(
-        Administra.id_espacio_deportivo == espacio_id,
-        Administra.id_usuario == gestor_id
-    ).first()
+    # Buscar si ya hay un gestor asignado
+    gestor_actual = db.query(Administra)\
+        .join(Usuario, Administra.id_usuario == Usuario.id_usuario)\
+        .filter(
+            Administra.id_espacio_deportivo == espacio_id,
+            Usuario.rol == "gestor"
+        ).first()
     
-    if existing_asignacion:
-        raise HTTPException(
-            status_code=400,
-            detail="Este gestor ya está asignado a este espacio"
+    if gestor_actual:
+        # Actualizar asignación existente
+        gestor_actual.id_usuario = gestor_id
+        gestor_actual.fecha_asignacion = datetime.now()
+    else:
+        # Crear nueva asignación
+        nueva_asignacion = Administra(
+            id_espacio_deportivo=espacio_id,
+            id_usuario=gestor_id,
+            fecha_asignacion=datetime.now()
         )
+        db.add(nueva_asignacion)
     
-    # Crear la asignación
-    nueva_asignacion = Administra(
-        id_espacio_deportivo=espacio_id,
-        id_usuario=gestor_id
-    )
-    
-    db.add(nueva_asignacion)
     db.commit()
     
     return {
@@ -454,6 +706,69 @@ def asignar_gestor_espacio(
             "id_gestor": gestor_id,
             "nombre_espacio": espacio.nombre,
             "nombre_gestor": f"{gestor.nombre} {gestor.apellido}"
+        }
+    }
+
+@router.post("/{espacio_id}/asignar-control-acceso/{control_id}")
+def asignar_control_acceso_espacio(
+    espacio_id: int,
+    control_id: int,
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user)
+):
+    """Asignar un control de acceso a un espacio deportivo - SOLO ADMIN"""
+    
+    if current_user.rol != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo los administradores pueden asignar controles de acceso"
+        )
+    
+    # Verificar que el espacio existe
+    espacio = db.query(EspacioDeportivo).filter(EspacioDeportivo.id_espacio_deportivo == espacio_id).first()
+    if not espacio:
+        raise HTTPException(status_code=404, detail="Espacio deportivo no encontrado")
+    
+    # Verificar que el usuario es un control de acceso
+    control = db.query(Usuario).filter(
+        Usuario.id_usuario == control_id,
+        Usuario.rol == "control_acceso",
+        Usuario.estado == "activo"
+    ).first()
+    
+    if not control:
+        raise HTTPException(status_code=404, detail="Control de acceso no encontrado o no está activo")
+    
+    # Buscar si ya hay un control de acceso asignado
+    control_actual = db.query(Administra)\
+        .join(Usuario, Administra.id_usuario == Usuario.id_usuario)\
+        .filter(
+            Administra.id_espacio_deportivo == espacio_id,
+            Usuario.rol == "control_acceso"
+        ).first()
+    
+    if control_actual:
+        # Actualizar asignación existente
+        control_actual.id_usuario = control_id
+        control_actual.fecha_asignacion = datetime.now()
+    else:
+        # Crear nueva asignación
+        nueva_asignacion = Administra(
+            id_espacio_deportivo=espacio_id,
+            id_usuario=control_id,
+            fecha_asignacion=datetime.now()
+        )
+        db.add(nueva_asignacion)
+    
+    db.commit()
+    
+    return {
+        "detail": f"Control de acceso {control.nombre} {control.apellido} asignado exitosamente al espacio {espacio.nombre}",
+        "asignacion": {
+            "id_espacio": espacio_id,
+            "id_control": control_id,
+            "nombre_espacio": espacio.nombre,
+            "nombre_control": f"{control.nombre} {control.apellido}"
         }
     }
 
@@ -470,16 +785,19 @@ def get_gestor_asignado(
             detail="Solo los administradores pueden ver esta información"
         )
     
-    # Buscar la asignación en la tabla administra
-    asignacion = db.query(Administra).filter(
-        Administra.id_espacio_deportivo == espacio_id
-    ).first()
+    # Buscar el gestor asignado
+    gestor_asignacion = db.query(Administra)\
+        .join(Usuario, Administra.id_usuario == Usuario.id_usuario)\
+        .filter(
+            Administra.id_espacio_deportivo == espacio_id,
+            Usuario.rol == "gestor"
+        ).first()
     
-    if not asignacion:
+    if not gestor_asignacion:
         return {"gestor_asignado": None}
     
     # Obtener información del gestor
-    gestor = db.query(Usuario).filter(Usuario.id_usuario == asignacion.id_usuario).first()
+    gestor = db.query(Usuario).filter(Usuario.id_usuario == gestor_asignacion.id_usuario).first()
     
     if gestor:
         return {
@@ -487,8 +805,49 @@ def get_gestor_asignado(
                 "id_usuario": gestor.id_usuario,
                 "nombre": gestor.nombre,
                 "apellido": gestor.apellido,
-                "email": gestor.email
+                "email": gestor.email,
+                "fecha_asignacion": gestor_asignacion.fecha_asignacion
             }
         }
     else:
         return {"gestor_asignado": None}
+
+@router.get("/{espacio_id}/control-acceso-asignado")
+def get_control_acceso_asignado(
+    espacio_id: int,
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user)
+):
+    """Obtener el control de acceso asignado a un espacio deportivo - SOLO ADMIN"""
+    if current_user.rol != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo los administradores pueden ver esta información"
+        )
+    
+    # Buscar el control de acceso asignado
+    control_asignacion = db.query(Administra)\
+        .join(Usuario, Administra.id_usuario == Usuario.id_usuario)\
+        .filter(
+            Administra.id_espacio_deportivo == espacio_id,
+            Usuario.rol == "control_acceso"
+        ).first()
+    
+    if not control_asignacion:
+        return {"control_acceso_asignado": None}
+    
+    # Obtener información del control de acceso
+    control = db.query(Usuario).filter(Usuario.id_usuario == control_asignacion.id_usuario).first()
+    
+    if control:
+        return {
+            "control_acceso_asignado": {
+                "id_usuario": control.id_usuario,
+                "nombre": control.nombre,
+                "apellido": control.apellido,
+                "email": control.email,
+                "fecha_asignacion": control_asignacion.fecha_asignacion
+            }
+        }
+    else:
+        return {"control_acceso_asignado": None}
