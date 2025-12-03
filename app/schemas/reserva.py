@@ -1,8 +1,4 @@
-# 📍 ARCHIVO: app/schemas/reserva.py
-# 🎯 PROPÓSITO: Esquemas Pydantic para Reservas
-# 💡 CAMBIO PRINCIPAL: Agregar campo codigo_cupon al esquema de creación
-
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from typing import Optional
 from datetime import date, time, datetime
 from decimal import Decimal
@@ -16,13 +12,19 @@ class ReservaBase(BaseModel):
     id_disciplina: int = Field(..., description="ID de la disciplina")
     id_cancha: int = Field(..., description="ID de la cancha")
     id_usuario: int = Field(..., description="ID del usuario")
+    
+    @validator('hora_inicio', 'hora_fin')
+    def validate_full_hours(cls, v):
+        if v.minute != 0:
+            raise ValueError('La hora debe ser en punto (ej: 10:00, 11:00)')
+        return v
 
 class ReservaCreate(ReservaBase):
     """
     🎯 ESQUEMA PARA CREAR RESERVA - ACTUALIZADO
     💡 CAMBIO: Agregar campo opcional para código de cupón
     """
-    codigo_cupon: Optional[str] = Field(None, description="Código de cupón a aplicar")  # ✅ NUEVO CAMPO
+    codigo_cupon: Optional[str] = Field(None, description="Código de cupón a aplicar")
 
 class ReservaUpdate(BaseModel):
     fecha_reserva: Optional[date] = None
@@ -34,19 +36,15 @@ class ReservaUpdate(BaseModel):
     id_disciplina: Optional[int] = None
     id_cancha: Optional[int] = None
 
-    class Config:
-        from_attributes = True
-
 class ReservaResponse(ReservaBase):
     """
-    🎯 ESQUEMA DE RESPUESTA PARA RESERVA
+    🎯 ESQUEMA DE RESPUESTA PARA RESERVA - CORREGIDO
     """
     id_reserva: int
     codigo_reserva: str
     estado: str
     costo_total: Decimal
-    codigo_reserva: Optional[str] = None  # ✅ CAMBIAR A OPCIONAL TEMPORALMENTE
-    qr_code: Optional[str] = None
+    qr_code: Optional[str] = None 
     fecha_creacion: datetime
     
     class Config:

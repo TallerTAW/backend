@@ -1,13 +1,9 @@
 # 📍 ARCHIVO: app/routers/reservas_opcion.py
-# 🎯 PROPÓSITO: Endpoint completo de reservas con integración de cupones
-# 💡 CAMBIOS PRINCIPALES: 
-#   - Integración completa del sistema de cupones
-#   - Aplicación de descuento durante la creación de reserva
-#   - Debugging mejorado para cupones
-#   - ✅ CORRECCIÓN: Conversión de decimal.Decimal a float en cálculo de descuentos
+# 🎯 PROPÓSITO: Endpoint completo de reservas con integración de cupones y todas las funciones
+# 💡 VERSIÓN FUSIONADA: Combina reservas_opcion.py original con reservas.py básico
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_, or_
 from datetime import datetime, date, time
 from typing import List, Optional
@@ -16,14 +12,11 @@ from app.models.reserva import Reserva
 from app.models.cancha import Cancha
 from app.models.usuario import Usuario
 from app.models.disciplina import Disciplina
-from app.models.cupon import Cupon  # ✅ NUEVA IMPORTACIÓN
+from app.models.cupon import Cupon
 from app.schemas.reserva import ReservaResponse, ReservaCreate, ReservaUpdate
-from app.schemas.cupon import CuponAplicar  # ✅ NUEVA IMPORTACIÓN
 from app.models.administra import Administra
-from app.core.security import get_password_hash
 import random
 import string
-from app.schemas.cancha import VerificarDisponibilidadRequest
 from sqlalchemy import text
 
 router = APIRouter()
@@ -55,25 +48,7 @@ def calcular_costo_total(hora_inicio: time, hora_fin: time, precio_por_hora: flo
     duracion_horas = duracion_minutos / 60.0
     return round(duracion_horas * precio_por_hora, 2)
 
-def verificar_disponibilidad_cancha(db: Session, id_cancha: int, fecha_reserva: date, hora_inicio: time, hora_fin: time, id_reserva_excluir: Optional[int] = None):
-    """Verificar si la cancha está disponible en el horario solicitado"""
-    query = db.query(Reserva).filter(
-        Reserva.id_cancha == id_cancha,
-        Reserva.fecha_reserva == fecha_reserva,
-        Reserva.estado.in_(["pendiente", "confirmada", "en_curso"]),
-        or_(
-            # Solapamiento de horarios
-            and_(Reserva.hora_inicio <= hora_inicio, Reserva.hora_fin > hora_inicio),
-            and_(Reserva.hora_inicio < hora_fin, Reserva.hora_fin >= hora_fin),
-            and_(Reserva.hora_inicio >= hora_inicio, Reserva.hora_fin <= hora_fin)
-        )
-    )
-    
-    if id_reserva_excluir:
-        query = query.filter(Reserva.id_reserva != id_reserva_excluir)
-    
-    reserva_conflicto = query.first()
-    return reserva_conflicto is None
+# ========== ENDPOINTS BÁSICOS DE RESERVAS (del archivo reservas.py) ==========
 
 @router.get("/", response_model=List[ReservaResponse])
 def get_reservas(
@@ -86,8 +61,12 @@ def get_reservas(
     id_cancha: Optional[int] = None,
     db: Session = Depends(get_db)
 ):
-    """Obtener lista de reservas con filtros opcionales"""
-    query = db.query(Reserva)
+    """Obtener lista de reservas con filtros opcionales y relaciones cargadas"""
+    query = db.query(Reserva).options(
+        joinedload(Reserva.usuario),
+        joinedload(Reserva.cancha).joinedload(Cancha.espacio_deportivo),
+        joinedload(Reserva.disciplina)
+    )
     
     # Aplicar filtros
     if estado:
@@ -111,21 +90,166 @@ def get_reservas(
     reservas_sin_codigo = [r for r in reservas if not r.codigo_reserva]
     if reservas_sin_codigo:
         print(f"⚠️  ADVERTENCIA: {len(reservas_sin_codigo)} reservas sin código")
+        # Generar códigos temporales para evitar errores en frontend
+        for reserva in reservas_sin_codigo:
+            reserva.codigo_reserva = f"TEMP-{reserva.id_reserva}"
     
     return reservas
 
 @router.get("/{reserva_id}", response_model=ReservaResponse)
 def get_reserva(reserva_id: int, db: Session = Depends(get_db)):
-    """Obtener una reserva específica por ID"""
-    reserva = db.query(Reserva).filter(Reserva.id_reserva == reserva_id).first()
+    """Obtener una reserva específica por ID con relaciones"""
+    reserva = db.query(Reserva).options(
+        joinedload(Reserva.usuario),
+        joinedload(Reserva.cancha).joinedload(Cancha.espacio_deportivo),
+        joinedload(Reserva.disciplina)
+    ).filter(Reserva.id_reserva == reserva_id).first()
+    
     if not reserva:
         raise HTTPException(status_code=404, detail="Reserva no encontrada")
     
     # ✅ VALIDACIÓN: Verificar que tenga código
     if not reserva.codigo_reserva:
         print(f"⚠️  ADVERTENCIA: Reserva {reserva_id} sin código_reserva")
+        reserva.codigo_reserva = f"TEMP-{reserva_id}"
     
     return reserva
+
+@router.get("/usuario/{usuario_id}", response_model=List[ReservaResponse])
+def get_reservas_usuario(usuario_id: int, db: Session = Depends(get_db)):
+    """Obtener reservas de un usuario específico con relaciones"""
+    print(f"👤 [BACKEND] Obteniendo reservas para usuario {usuario_id}")
+    
+    # Verificar que el usuario existe
+    usuario = db.query(Usuario).filter(Usuario.id_usuario == usuario_id).first()
+    if not usuario:
+        print(f"❌ [BACKEND] Usuario {usuario_id} no encontrado")
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    
+    # Obtener reservas del usuario con relaciones
+    reservas = db.query(Reserva).options(
+        joinedload(Reserva.usuario),
+        joinedload(Reserva.cancha).joinedload(Cancha.espacio_deportivo),
+        joinedload(Reserva.disciplina)
+    ).filter(
+        Reserva.id_usuario == usuario_id
+    ).order_by(
+        Reserva.fecha_reserva.desc(),
+        Reserva.hora_inicio.desc()
+    ).all()
+    
+    print(f"✅ [BACKEND] Encontradas {len(reservas)} reservas para usuario {usuario_id}")
+    
+    # ✅ VALIDACIÓN: Generar códigos temporales si son NULL
+    for reserva in reservas:
+        if not reserva.codigo_reserva:
+            reserva.codigo_reserva = f"TEMP-{reserva.id_reserva}"
+            print(f"⚠️  ADVERTENCIA: Reserva {reserva.id_reserva} sin código, usando temporal")
+    
+    return reservas
+
+@router.patch("/{reserva_id}", response_model=ReservaResponse)
+def update_reserva(reserva_id: int, reserva_data: ReservaUpdate, db: Session = Depends(get_db)):
+    """Actualizar reserva (principalmente estado) - NUEVO ENDPOINT PATCH"""
+    print(f"🔧 [BACKEND] Actualizando reserva {reserva_id} con datos: {reserva_data.dict()}")
+    
+    reserva = db.query(Reserva).filter(Reserva.id_reserva == reserva_id).first()
+    if not reserva:
+        print(f"❌ [BACKEND] Reserva {reserva_id} no encontrada")
+        raise HTTPException(status_code=404, detail="Reserva no encontrada")
+
+    # Log del estado actual
+    print(f"📋 [BACKEND] Estado actual de reserva {reserva_id}: {reserva.estado}")
+    
+    # Actualizar campos permitidos
+    campos_permitidos = ['estado', 'material_prestado', 'cantidad_asistentes']
+    campos_actualizados = []
+    
+    for campo, valor in reserva_data.dict(exclude_unset=True).items():
+        if campo in campos_permitidos and valor is not None:
+            setattr(reserva, campo, valor)
+            campos_actualizados.append(campo)
+            print(f"✅ [BACKEND] Campo actualizado: {campo} = {valor}")
+
+    if not campos_actualizados:
+        print("⚠️ [BACKEND] No se actualizaron campos (ningún cambio o campos no permitidos)")
+    
+    try:
+        db.commit()
+        db.refresh(reserva)
+        print(f"🎉 [BACKEND] Reserva {reserva_id} actualizada exitosamente. Campos: {campos_actualizados}")
+        
+        # Recargar con relaciones
+        reserva_actualizada = db.query(Reserva).options(
+            joinedload(Reserva.usuario),
+            joinedload(Reserva.cancha).joinedload(Cancha.espacio_deportivo),
+            joinedload(Reserva.disciplina)
+        ).filter(Reserva.id_reserva == reserva_id).first()
+        
+        return reserva_actualizada
+        
+    except Exception as e:
+        db.rollback()
+        print(f"❌ [BACKEND] Error al actualizar reserva {reserva_id}: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al actualizar reserva: {str(e)}"
+        )
+
+@router.delete("/{reserva_id}")
+def cancelar_reserva(reserva_id: int, motivo: str = None, db: Session = Depends(get_db)):
+    """Cancelar reserva (borrado lógico cambiando estado) - NUEVO ENDPOINT DELETE"""
+    print(f"🗑️ [BACKEND] Cancelando reserva {reserva_id}. Motivo: {motivo}")
+    
+    reserva = db.query(Reserva).filter(Reserva.id_reserva == reserva_id).first()
+    if not reserva:
+        print(f"❌ [BACKEND] Reserva {reserva_id} no encontrada")
+        raise HTTPException(status_code=404, detail="Reserva no encontrada")
+    
+    if reserva.estado == 'cancelada':
+        print(f"⚠️ [BACKEND] Reserva {reserva_id} ya está cancelada")
+        raise HTTPException(status_code=400, detail="La reserva ya está cancelada")
+    
+    # Guardar el estado anterior para logging
+    estado_anterior = reserva.estado
+    
+    # Cambiar estado a cancelada
+    reserva.estado = 'cancelada'
+    
+    # Aquí podrías crear un registro en la tabla cancelacion si lo necesitas
+    try:
+        from app.models.cancelacion import Cancelacion
+        cancelacion = Cancelacion(
+            motivo=motivo or "Cancelación por administrador",
+            id_reserva=reserva_id,
+            id_usuario=reserva.id_usuario  # o el usuario que cancela
+        )
+        db.add(cancelacion)
+        print(f"✅ [BACKEND] Registro de cancelación creado para reserva {reserva_id}")
+    except Exception as e:
+        print(f"⚠️ [BACKEND] No se pudo crear registro de cancelación: {str(e)}")
+        # No fallar si no se puede crear el registro de cancelación
+    
+    try:
+        db.commit()
+        print(f"🎉 [BACKEND] Reserva {reserva_id} cancelada exitosamente. Estado anterior: {estado_anterior}")
+        
+        return {
+            "detail": "Reserva cancelada exitosamente", 
+            "motivo": motivo,
+            "reserva_id": reserva_id,
+            "estado_anterior": estado_anterior
+        }
+        
+    except Exception as e:
+        db.rollback()
+        print(f"❌ [BACKEND] Error al cancelar reserva {reserva_id}: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al cancelar reserva: {str(e)}"
+        )
+
+# ========== ENDPOINTS COMPLETOS CON CUPONES (del archivo reservas_opcion.py original) ==========
 
 @router.post("/", response_model=ReservaResponse)
 def create_reserva(reserva_data: ReservaCreate, db: Session = Depends(get_db)):
@@ -135,11 +259,22 @@ def create_reserva(reserva_data: ReservaCreate, db: Session = Depends(get_db)):
     💡 CORRECCIÓN CRÍTICA: Conversión de decimal.Decimal a float en cálculo de descuentos
     """
     print(f"🎯 [BACKEND] Iniciando creación de reserva: {reserva_data.dict()}")
+
+    # ✅ VALIDACIÓN: Solo horas completas (minutos en 00)
+    if reserva_data.hora_inicio.minute != 0 or reserva_data.hora_fin.minute != 0:
+        raise HTTPException(
+            status_code=400, 
+            detail="Las reservas solo pueden hacerse en horas completas (ej: 10:00, 11:00). Por favor, seleccione una hora en punto."
+        )
     
     # Verificar que la cancha existe
     cancha = db.query(Cancha).filter(Cancha.id_cancha == reserva_data.id_cancha).first()
     if not cancha:
         raise HTTPException(status_code=404, detail="Cancha no encontrada")
+    
+    # ✅ VALIDACIÓN ADICIONAL: Cancha debe estar activa
+    if cancha.estado != 'disponible':
+        raise HTTPException(status_code=400, detail="La cancha no está disponible para reservas")
     
     # Verificar que la disciplina existe
     disciplina = db.query(Disciplina).filter(Disciplina.id_disciplina == reserva_data.id_disciplina).first()
@@ -299,7 +434,14 @@ def create_reserva(reserva_data: ReservaCreate, db: Session = Depends(get_db)):
         reserva_verificada = db.query(Reserva).filter(Reserva.id_reserva == nueva_reserva.id_reserva).first()
         print(f"🔍 [BACKEND] Reserva verificada en BD: ID {reserva_verificada.id_reserva}, Estado: {reserva_verificada.estado}, Código: {reserva_verificada.codigo_reserva}, Costo Final: ${reserva_verificada.costo_total}")
         
-        return nueva_reserva
+        # Recargar con relaciones para la respuesta
+        reserva_con_relaciones = db.query(Reserva).options(
+            joinedload(Reserva.usuario),
+            joinedload(Reserva.cancha).joinedload(Cancha.espacio_deportivo),
+            joinedload(Reserva.disciplina)
+        ).filter(Reserva.id_reserva == nueva_reserva.id_reserva).first()
+        
+        return reserva_con_relaciones
         
     except Exception as e:
         db.rollback()
@@ -308,6 +450,8 @@ def create_reserva(reserva_data: ReservaCreate, db: Session = Depends(get_db)):
             status_code=500,
             detail=f"Error al crear reserva: {str(e)}"
         )
+
+# ========== ENDPOINTS ESPECIALES PARA DISPONIBILIDAD ==========
 
 @router.get("/cancha/{cancha_id}/horarios-disponibles")
 def get_horarios_disponibles(
@@ -383,15 +527,27 @@ def get_horarios_disponibles(
 @router.get("/verificar-disponibilidad")
 def verificar_disponibilidad(
     cancha_id: int,
-    fecha: date,
+    fecha: str,  # String, no date
     hora_inicio: str,
     hora_fin: str,
     db: Session = Depends(get_db)
 ):
-    """Verificar disponibilidad usando la función PostgreSQL"""
+    """Verificar disponibilidad usando la función PostgreSQL - VERSIÓN SIMPLIFICADA Y CORREGIDA"""
     try:
+        print(f"🔍 [BACKEND] Verificando disponibilidad: cancha={cancha_id}, fecha={fecha}, {hora_inicio}-{hora_fin}")
+        
+        # Asegurar formato correcto para PostgreSQL
+        # PostgreSQL espera formato TIME 'HH:MM:SS' y DATE 'YYYY-MM-DD'
+        
         result = db.execute(
-            text("SELECT verificar_disponibilidad(:p_id_cancha, :p_fecha, :p_hora_inicio, :p_hora_fin)"),
+            text("""
+                SELECT verificar_disponibilidad(
+                    :p_id_cancha::integer, 
+                    :p_fecha::date, 
+                    :p_hora_inicio::time, 
+                    :p_hora_fin::time
+                ) as disponible
+            """),
             {
                 "p_id_cancha": cancha_id,
                 "p_fecha": fecha,
@@ -400,13 +556,20 @@ def verificar_disponibilidad(
             }
         ).scalar()
         
+        print(f"✅ [BACKEND] Resultado disponibilidad: {result}")
+        
         return {"disponible": result}
         
     except Exception as e:
+        print(f"❌ [BACKEND] Error al verificar disponibilidad: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(
             status_code=500, 
             detail=f"Error al verificar disponibilidad: {str(e)}"
         )
+
+# ========== ENDPOINTS ADICIONALES ==========
 
 @router.get("/estado/{reserva_id}")
 def get_estado_reserva(reserva_id: int, db: Session = Depends(get_db)):
@@ -426,108 +589,18 @@ def get_estado_reserva(reserva_id: int, db: Session = Depends(get_db)):
 
 @router.get("/codigo/{codigo_reserva}", response_model=ReservaResponse)
 def get_reserva_por_codigo(codigo_reserva: str, db: Session = Depends(get_db)):
-    """Obtener una reserva por su código único"""
-    reserva = db.query(Reserva).filter(Reserva.codigo_reserva == codigo_reserva).first()
+    """Obtener una reserva por su código único con relaciones"""
+    reserva = db.query(Reserva).options(
+        joinedload(Reserva.usuario),
+        joinedload(Reserva.cancha).joinedload(Cancha.espacio_deportivo),
+        joinedload(Reserva.disciplina)
+    ).filter(Reserva.codigo_reserva == codigo_reserva).first()
+    
     if not reserva:
         raise HTTPException(status_code=404, detail="Reserva no encontrada")
     
     return reserva
 
-@router.patch("/{reserva_id}", response_model=ReservaResponse)
-def update_reserva(reserva_id: int, reserva_data: ReservaUpdate, db: Session = Depends(get_db)):
-    """Actualizar reserva (principalmente estado) - NUEVO ENDPOINT PATCH"""
-    print(f"🔧 [BACKEND] Actualizando reserva {reserva_id} con datos: {reserva_data.dict()}")
-    
-    reserva = db.query(Reserva).filter(Reserva.id_reserva == reserva_id).first()
-    if not reserva:
-        print(f"❌ [BACKEND] Reserva {reserva_id} no encontrada")
-        raise HTTPException(status_code=404, detail="Reserva no encontrada")
-
-    # Log del estado actual
-    print(f"📋 [BACKEND] Estado actual de reserva {reserva_id}: {reserva.estado}")
-    
-    # Actualizar campos permitidos
-    campos_permitidos = ['estado', 'material_prestado', 'cantidad_asistentes']
-    campos_actualizados = []
-    
-    for campo, valor in reserva_data.dict(exclude_unset=True).items():
-        if campo in campos_permitidos and valor is not None:
-            setattr(reserva, campo, valor)
-            campos_actualizados.append(campo)
-            print(f"✅ [BACKEND] Campo actualizado: {campo} = {valor}")
-
-    if not campos_actualizados:
-        print("⚠️ [BACKEND] No se actualizaron campos (ningún cambio o campos no permitidos)")
-    
-    try:
-        db.commit()
-        db.refresh(reserva)
-        print(f"🎉 [BACKEND] Reserva {reserva_id} actualizada exitosamente. Campos: {campos_actualizados}")
-        
-        return reserva
-        
-    except Exception as e:
-        db.rollback()
-        print(f"❌ [BACKEND] Error al actualizar reserva {reserva_id}: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error al actualizar reserva: {str(e)}"
-        )
-    
-@router.delete("/{reserva_id}")
-def cancelar_reserva(reserva_id: int, motivo: str = None, db: Session = Depends(get_db)):
-    """Cancelar reserva (borrado lógico cambiando estado) - NUEVO ENDPOINT DELETE"""
-    print(f"🗑️ [BACKEND] Cancelando reserva {reserva_id}. Motivo: {motivo}")
-    
-    reserva = db.query(Reserva).filter(Reserva.id_reserva == reserva_id).first()
-    if not reserva:
-        print(f"❌ [BACKEND] Reserva {reserva_id} no encontrada")
-        raise HTTPException(status_code=404, detail="Reserva no encontrada")
-    
-    if reserva.estado == 'cancelada':
-        print(f"⚠️ [BACKEND] Reserva {reserva_id} ya está cancelada")
-        raise HTTPException(status_code=400, detail="La reserva ya está cancelada")
-    
-    # Guardar el estado anterior para logging
-    estado_anterior = reserva.estado
-    
-    # Cambiar estado a cancelada
-    reserva.estado = 'cancelada'
-    
-    # Aquí podrías crear un registro en la tabla cancelacion si lo necesitas
-    try:
-        from app.models.cancelacion import Cancelacion
-        cancelacion = Cancelacion(
-            motivo=motivo or "Cancelación por administrador",
-            id_reserva=reserva_id,
-            id_usuario=reserva.id_usuario  # o el usuario que cancela
-        )
-        db.add(cancelacion)
-        print(f"✅ [BACKEND] Registro de cancelación creado para reserva {reserva_id}")
-    except Exception as e:
-        print(f"⚠️ [BACKEND] No se pudo crear registro de cancelación: {str(e)}")
-        # No fallar si no se puede crear el registro de cancelación
-    
-    try:
-        db.commit()
-        print(f"🎉 [BACKEND] Reserva {reserva_id} cancelada exitosamente. Estado anterior: {estado_anterior}")
-        
-        return {
-            "detail": "Reserva cancelada exitosamente", 
-            "motivo": motivo,
-            "reserva_id": reserva_id,
-            "estado_anterior": estado_anterior
-        }
-        
-    except Exception as e:
-        db.rollback()
-        print(f"❌ [BACKEND] Error al cancelar reserva {reserva_id}: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error al cancelar reserva: {str(e)}"
-        )
-    
-# En app/routers/reservas_opcion.py - Endpoint corregido
 @router.get("/gestor/mis-reservas", response_model=List[ReservaResponse])
 def get_reservas_gestor(
     gestor_id: int,
@@ -564,8 +637,12 @@ def get_reservas_gestor(
     
     print(f"⚽ [BACKEND] Canchas del gestor: {canchas_ids}")
     
-    # 3. Query para reservas de las canchas del gestor
-    query = db.query(Reserva).filter(Reserva.id_cancha.in_(canchas_ids))
+    # 3. Query para reservas de las canchas del gestor con relaciones
+    query = db.query(Reserva).options(
+        joinedload(Reserva.usuario),
+        joinedload(Reserva.cancha).joinedload(Cancha.espacio_deportivo),
+        joinedload(Reserva.disciplina)
+    ).filter(Reserva.id_cancha.in_(canchas_ids))
     
     if estado:
         query = query.filter(Reserva.estado == estado)
@@ -576,31 +653,38 @@ def get_reservas_gestor(
     
     return reservas
 
-@router.get("/usuario/{usuario_id}", response_model=List[ReservaResponse])
-def get_reservas_usuario(usuario_id: int, db: Session = Depends(get_db)):
-    """Obtener reservas de un usuario específico"""
-    print(f"👤 [BACKEND] Obteniendo reservas para usuario {usuario_id}")
+@router.get("/proximas/{dias}")
+def get_reservas_proximas(dias: int = 7, db: Session = Depends(get_db)):
+    """Obtener reservas próximas (en los próximos X días)"""
+    fecha_actual = date.today()
+    fecha_limite = fecha_actual + datetime.timedelta(days=dias)
     
-    # Verificar que el usuario existe
-    usuario = db.query(Usuario).filter(Usuario.id_usuario == usuario_id).first()
-    if not usuario:
-        print(f"❌ [BACKEND] Usuario {usuario_id} no encontrado")
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    
-    # Obtener reservas del usuario
-    reservas = db.query(Reserva).filter(
-        Reserva.id_usuario == usuario_id
+    reservas = db.query(Reserva).options(
+        joinedload(Reserva.usuario),
+        joinedload(Reserva.cancha).joinedload(Cancha.espacio_deportivo),
+        joinedload(Reserva.disciplina)
+    ).filter(
+        Reserva.fecha_reserva >= fecha_actual,
+        Reserva.fecha_reserva <= fecha_limite,
+        Reserva.estado.in_(["pendiente", "confirmada"])
     ).order_by(
-        Reserva.fecha_reserva.desc(),
-        Reserva.hora_inicio.desc()
+        Reserva.fecha_reserva,
+        Reserva.hora_inicio
     ).all()
     
-    print(f"✅ [BACKEND] Encontradas {len(reservas)} reservas para usuario {usuario_id}")
-    
-    # ✅ VALIDACIÓN: Generar códigos temporales si son NULL
-    for reserva in reservas:
-        if not reserva.codigo_reserva:
-            reserva.codigo_reserva = f"TEMP-{reserva.id_reserva}"
-            print(f"⚠️  ADVERTENCIA: Reserva {reserva.id_reserva} sin código, usando temporal")
-    
     return reservas
+
+@router.post("/{reserva_id}/confirmar")
+def confirmar_reserva(reserva_id: int, db: Session = Depends(get_db)):
+    """Confirmar una reserva pendiente"""
+    reserva = db.query(Reserva).filter(Reserva.id_reserva == reserva_id).first()
+    if not reserva:
+        raise HTTPException(status_code=404, detail="Reserva no encontrada")
+    
+    if reserva.estado != "pendiente":
+        raise HTTPException(status_code=400, detail="Solo se pueden confirmar reservas pendientes")
+    
+    reserva.estado = "confirmada"
+    db.commit()
+    
+    return {"detail": "Reserva confirmada exitosamente"}
