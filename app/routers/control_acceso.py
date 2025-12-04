@@ -124,6 +124,160 @@ def verificar_qr_asistente(
                 }
             )
         
+        # ✅ TODO VERIFICADO - REGISTRAR ASISTENCIA
+        asistente.asistio = True
+        asistente.fecha_validacion = datetime.now()
+        
+        try:
+            db.commit()
+            logger.info(f"✅ Asistencia registrada exitosamente: {asistente.nombre}")
+            
+            # Preparar respuesta exitosa
+            response_data = {
+                "success": True,
+                "message": f"Asistencia registrada exitosamente para {asistente.nombre}",
+                "asistente": {
+                    "id_asistente": asistente.id_asistente,
+                    "nombre": asistente.nombre,
+                    "email": asistente.email,
+                    "codigo_qr": asistente.codigo_qr,
+                    "asistio": asistente.asistio,
+                    "fecha_validacion": asistente.fecha_validacion
+                },
+                "reserva": {
+                    "id_reserva": reserva.id_reserva,
+                    "codigo_reserva": reserva.codigo_reserva,
+                    "cancha": reserva.cancha.nombre if reserva.cancha else "N/A",
+                    "fecha": reserva.fecha_reserva.strftime("%d/%m/%Y"),
+                    "hora_inicio": reserva.hora_inicio.strftime("%H:%M"),
+                    "hora_fin": reserva.hora_fin.strftime("%H:%M"),
+                    "estado": reserva.estado
+                }
+            }
+            
+            return response_data
+            
+        except Exception as e:
+            db.rollback()
+            logger.error(f"❌ Error al guardar en BD: {str(e)}")
+            traceback.print_exc()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Error al registrar asistencia en la base de datos"
+            )
+            
+    except HTTPException as he:
+        logger.error(f"HTTP Exception: {he.detail}")
+        raise he
+    except Exception as e:
+        logger.error(f"❌ Error inesperado: {str(e)}")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error interno del servidor al verificar QR"
+        )
+
+'''
+@router.post("/verificar-qr", response_model=VerificacionQRResponse)
+def verificar_qr_asistente(
+    request: VerificarQRRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Verificar QR de asistente para control de acceso
+    Solo permite si la reserva está en estado "confirmada" o "en_curso"
+    """
+    try:
+        codigo_qr = request.codigo_qr
+        token_verificacion = request.token_verificacion
+        
+        logger.info(f"🔍 Iniciando verificación QR: {codigo_qr[:10]}...")
+        
+        # Buscar asistente con relaciones
+        asistente = db.query(AsistenteReserva).options(
+            joinedload(AsistenteReserva.reserva).joinedload(Reserva.cancha)
+        ).filter(
+            AsistenteReserva.codigo_qr == codigo_qr,
+            AsistenteReserva.token_verificacion == token_verificacion
+        ).first()
+        
+        if not asistente:
+            logger.warning(f"❌ QR no encontrado: {codigo_qr}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Código QR no válido o no encontrado"
+            )
+        
+        logger.info(f"✅ Asistente encontrado: {asistente.nombre}")
+        
+        # Verificar si ya asistió
+        if asistente.asistio:
+            logger.warning(f"⚠️ Asistente ya registró asistencia: {asistente.nombre}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"El asistente {asistente.nombre} ya registró su asistencia"
+            )
+        
+        # Obtener reserva
+        reserva = asistente.reserva
+        if not reserva:
+            logger.error(f"❌ Reserva no encontrada para asistente: {asistente.id_asistente}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Reserva no encontrada"
+            )
+        
+        logger.info(f"📊 Reserva: {reserva.codigo_reserva} (ID: {reserva.id_reserva}), Estado: {reserva.estado}")
+        
+        # ✅ VERIFICACIÓN CRÍTICA: Solo permitir "confirmada" o "en_curso"
+        if reserva.estado not in ["confirmada", "en_curso"]:
+            logger.warning(f"❌ Estado no permitido: {reserva.estado}")
+            
+            # Mensaje específico para estado "pendiente"
+            if reserva.estado == "pendiente":
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "message": f"La reserva está en estado '{reserva.estado}'. Debe estar 'confirmada' para validar acceso.",
+                        "reserva_info": {
+                            "id_reserva": reserva.id_reserva,
+                            "codigo_reserva": reserva.codigo_reserva,
+                            "fecha": reserva.fecha_reserva.strftime("%d/%m/%Y"),
+                            "horario": f"{reserva.hora_inicio} - {reserva.hora_fin}",
+                            "cancha": reserva.cancha.nombre if reserva.cancha else "N/A",
+                            "estado_actual": reserva.estado
+                        },
+                        "requiere_accion": "confirmar_reserva"
+                    }
+                )
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={
+                        "message": f"La reserva está en estado '{reserva.estado}'. Solo se permite acceso para reservas 'confirmadas' o 'en_curso'.",
+                        "reserva_info": {
+                            "id_reserva": reserva.id_reserva,
+                            "codigo_reserva": reserva.codigo_reserva,
+                            "estado_actual": reserva.estado
+                        }
+                    }
+                )
+        
+        # Verificar fecha (solo puede asistir el día de la reserva)
+        fecha_hoy = date.today()
+        if reserva.fecha_reserva != fecha_hoy:
+            logger.warning(f"❌ Fecha no coincide: {reserva.fecha_reserva} vs {fecha_hoy}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "message": f"La reserva es para el {reserva.fecha_reserva.strftime('%d/%m/%Y')}, no puede validar hoy ({fecha_hoy.strftime('%d/%m/%Y')})",
+                    "reserva_info": {
+                        "id_reserva": reserva.id_reserva,
+                        "fecha_reserva": reserva.fecha_reserva.strftime("%d/%m/%Y")
+                    }
+                }
+            )
+        
         # CORRECCIÓN: Calcular los horarios permitidos correctamente
         hora_actual = datetime.now().time()
         
@@ -222,6 +376,7 @@ def verificar_qr_asistente(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error interno del servidor al verificar QR"
         )
+    '''
 
 @router.get("/asistentes/{reserva_id}")
 def obtener_asistentes_reserva(
