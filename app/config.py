@@ -20,16 +20,24 @@ class Settings(BaseSettings):
     SUPABASE_SERVICE_KEY: str   # service_role key
     
     # CORS
-    FRONTEND_URLS: str = "http://localhost:5173,http://localhost:3000"
+    FRONTEND_URLS: str = "http://localhost:5173,http://localhost:3000,capacitor://localhost,http://localhost"
     
     @property
     def allowed_origins(self) -> List[str]:
         urls = self.FRONTEND_URLS.split(",")
         all_urls = []
         for url in urls:
-            all_urls.append(url.strip())
-            if url.startswith("http://"):
-                all_urls.append(url.replace("http://", "https://"))
+            url = url.strip()
+            if url:
+                all_urls.append(url)
+                # Añadir versión HTTPS si es HTTP
+                if url.startswith("http://"):
+                    all_urls.append(url.replace("http://", "https://"))
+        
+        # ⬇️⬇️⬇️ ¡AÑADE ESTO PARA PERMITIR MÓVIL! ⬇️⬇️⬇️
+        all_urls.append("*")  # Temporal para desarrollo
+        # ⬆️⬆️⬆️ ¡ESTO ES LO QUE NECESITAS! ⬆️⬆️⬆️
+        
         return all_urls
     
     class Config:
