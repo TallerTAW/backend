@@ -1,3 +1,4 @@
+# app/routers/canchas.py
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Form
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import text
@@ -10,37 +11,16 @@ from app.models.cancha_disciplina import CanchaDisciplina
 from app.schemas.cancha import CanchaResponse, CanchaCreate, CanchaUpdate, DisponibilidadResponse, HorarioDisponible
 from app.core.security import get_current_user
 from app.models.usuario import Usuario
+from app.services.supabase_storage import storage_service
 import os
-import shutil
 from typing import Optional
 import uuid
-
-UPLOAD_DIR_CANCHAS = "static/uploads/espacios/canchas"
-ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
-MAX_FILE_SIZE = 5 * 1024 * 1024
-
-os.makedirs(UPLOAD_DIR_CANCHAS, exist_ok=True)
-
-def allowed_file(filename: str) -> bool:
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-
-def save_uploaded_file_cancha(file: UploadFile) -> str:
-    """Guarda un archivo subido para canchas y retorna la ruta relativa"""
-    if not allowed_file(file.filename):
-        raise HTTPException(status_code=400, detail="Tipo de archivo no permitido")
-    
-    # Generar nombre único
-    file_extension = file.filename.rsplit('.', 1)[1].lower()
-    unique_filename = f"{uuid.uuid4().hex}.{file_extension}"
-    file_path = os.path.join(UPLOAD_DIR_CANCHAS, unique_filename)
-    
-    # Guardar archivo
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-    
-    return f"/{UPLOAD_DIR_CANCHAS}/{unique_filename}"
+from datetime import time
 
 router = APIRouter()
+
+# Eliminamos todas las funciones locales de manejo de archivos
+# Y usamos el servicio de Supabase Storage
 
 @router.get("/{cancha_id}/disponibilidad", response_model=DisponibilidadResponse)
 def get_disponibilidad_cancha(
@@ -90,7 +70,6 @@ def get_disponibilidad_cancha(
         )
         
     except Exception as e:
-        # Debug: imprime el error real
         print(f"Error en disponibilidad: {str(e)}")
         import traceback
         traceback.print_exc()
@@ -109,7 +88,6 @@ def get_disponibilidad_cancha_public(
     """Obtener horarios disponibles de una cancha (público)"""
     return get_disponibilidad_cancha(cancha_id, fecha, db)
 
-# ✅ ENDPOINT CORREGIDO: Filtrar canchas por espacio y disciplina usando la relación many-to-many
 @router.get("/public/espacio/{espacio_id}/disciplina/{disciplina_id}", response_model=list[CanchaResponse])
 def get_canchas_por_espacio_y_disciplina_public(
     espacio_id: int, 
@@ -129,13 +107,12 @@ def get_canchas_por_espacio_y_disciplina_public(
                 detail="Espacio deportivo no encontrado"
             )
         
-        # ✅ CORRECCIÓN: Usar join con la tabla cancha_disciplina para filtrar por disciplina
         canchas = db.query(Cancha).join(
             CanchaDisciplina, 
             Cancha.id_cancha == CanchaDisciplina.id_cancha
         ).filter(
             Cancha.id_espacio_deportivo == espacio_id,
-            CanchaDisciplina.id_disciplina == disciplina_id,  # ✅ Filtrar por disciplina a través de la relación
+            CanchaDisciplina.id_disciplina == disciplina_id,
             Cancha.estado == "disponible"
         ).all()
         
@@ -202,9 +179,6 @@ def get_canchas(
 ):
     """
     Obtener canchas según el rol del usuario
-    - Admin: ve todas las canchas
-    - Gestor/Control: ve solo las canchas de espacios que administra
-    - Cliente: no puede acceder
     """
     if current_user.rol == "cliente":
         raise HTTPException(
@@ -213,10 +187,8 @@ def get_canchas(
         )
     
     if current_user.rol == "admin":
-        # Admin ve todas las canchas
         canchas = db.query(Cancha).all()
     else:
-        # Gestor o control_acceso ve solo las canchas de espacios que administra
         canchas = db.query(Cancha).join(
             EspacioDeportivo,
             Cancha.id_espacio_deportivo == EspacioDeportivo.id_espacio_deportivo
@@ -286,7 +258,7 @@ async def create_cancha(
     db: Session = Depends(get_db),
     current_user: Usuario = Depends(get_current_user)
 ):
-    """Crear una nueva cancha con imagen"""
+    """CREAR CANCHA CON IMAGEN EN SUPABASE"""
     if not verificar_permiso_espacio(current_user, id_espacio_deportivo, db):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -314,15 +286,23 @@ async def create_cancha(
             detail="Ya existe una cancha con ese nombre en este espacio deportivo"
         )
     
-    # Procesar imagen si se proporciona
-    imagen_path = None
+    # PROCESAR IMAGEN CON SUPABASE
+    imagen_url = None
     if imagen and imagen.size > 0:
-        if imagen.size > MAX_FILE_SIZE:
-            raise HTTPException(status_code=400, detail="La imagen es demasiado grande (máximo 5MB)")
-        imagen_path = save_uploaded_file_cancha(imagen)
+        try:
+            imagen_url = await storage_service.upload_image(
+                file=imagen,
+                folder="canchas"
+            )
+        except HTTPException as e:
+            raise e
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error al subir imagen: {str(e)}"
+            )
     
-    # Convertir horas de string a time
-    from datetime import time
+    # Convertir horas
     hora_apertura_time = time.fromisoformat(hora_apertura)
     hora_cierre_time = time.fromisoformat(hora_cierre)
     
@@ -334,14 +314,13 @@ async def create_cancha(
         precio_por_hora=precio_por_hora,
         id_espacio_deportivo=id_espacio_deportivo,
         estado=estado,
-        imagen=imagen_path
+        imagen=imagen_url  # URL de Supabase
     )
     
     db.add(nueva_cancha)
     db.commit()
     db.refresh(nueva_cancha)
     return nueva_cancha
-
 
 @router.put("/{cancha_id}", response_model=CanchaResponse)
 async def update_cancha(
@@ -357,7 +336,7 @@ async def update_cancha(
     db: Session = Depends(get_db),
     current_user: Usuario = Depends(get_current_user)
 ):
-    """Actualizar una cancha existente con imagen"""
+    """ACTUALIZAR CANCHA CON IMAGEN EN SUPABASE"""
     if not verificar_permiso_cancha(current_user, cancha_id, db):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -371,7 +350,6 @@ async def update_cancha(
             detail="Cancha no encontrada"
         )
     
-    # Verificar permisos si se cambia el espacio deportivo
     if id_espacio_deportivo is not None:
         if not verificar_permiso_espacio(current_user, id_espacio_deportivo, db):
             raise HTTPException(
@@ -388,7 +366,6 @@ async def update_cancha(
                 detail="Espacio deportivo no encontrado"
             )
     
-    # Verificar nombre único si se está cambiando
     if nombre is not None and nombre != cancha.nombre:
         espacio_id_verificar = id_espacio_deportivo if id_espacio_deportivo is not None else cancha.id_espacio_deportivo
         
@@ -410,10 +387,8 @@ async def update_cancha(
     if tipo is not None:
         cancha.tipo = tipo
     if hora_apertura is not None:
-        from datetime import time
         cancha.hora_apertura = time.fromisoformat(hora_apertura)
     if hora_cierre is not None:
-        from datetime import time
         cancha.hora_cierre = time.fromisoformat(hora_cierre)
     if precio_por_hora is not None:
         cancha.precio_por_hora = precio_por_hora
@@ -422,31 +397,34 @@ async def update_cancha(
     if estado is not None:
         cancha.estado = estado
     
-    # Procesar nueva imagen si se proporciona
+    # PROCESAR NUEVA IMAGEN CON SUPABASE
     if imagen and imagen.size > 0:
-        if imagen.size > MAX_FILE_SIZE:
-            raise HTTPException(status_code=400, detail="La imagen es demasiado grande (máximo 5MB)")
-        
-        # Eliminar imagen anterior si existe
-        if cancha.imagen:
-            old_image_path = cancha.imagen.lstrip('/')
-            if os.path.exists(old_image_path):
-                os.remove(old_image_path)
-        
-        # Guardar nueva imagen
-        cancha.imagen = save_uploaded_file_cancha(imagen)
+        try:
+            # Subir nueva imagen
+            imagen_url = await storage_service.upload_image(
+                file=imagen,
+                folder="canchas"
+            )
+            cancha.imagen = imagen_url
+        except HTTPException as e:
+            raise e
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error al actualizar imagen: {str(e)}"
+            )
     
     db.commit()
     db.refresh(cancha)
     return cancha
 
 @router.delete("/{cancha_id}")
-def delete_cancha(
+async def delete_cancha(
     cancha_id: int, 
     db: Session = Depends(get_db),
     current_user: Usuario = Depends(get_current_user)
 ):
-    """Eliminar una cancha (borrado físico) con control de permisos"""
+    """Eliminar una cancha (borrado físico)"""
     if not verificar_permiso_cancha(current_user, cancha_id, db):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -472,6 +450,13 @@ def delete_cancha(
             detail="No se puede eliminar la cancha porque tiene reservas activas"
         )
     
+    # Eliminar imagen de Supabase si existe
+    if cancha.imagen and "supabase.co/storage" in cancha.imagen:
+        try:
+            await storage_service.delete_file(cancha.imagen)
+        except Exception as e:
+            print(f"Advertencia: No se pudo eliminar la imagen de Supabase: {str(e)}")
+    
     db.delete(cancha)
     db.commit()
     
@@ -483,7 +468,7 @@ def desactivar_cancha(
     db: Session = Depends(get_db),
     current_user: Usuario = Depends(get_current_user)
 ):
-    """Desactivar una cancha (borrado lógico) con control de permisos"""
+    """Desactivar una cancha (borrado lógico)"""
     if not verificar_permiso_cancha(current_user, cancha_id, db):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -515,7 +500,7 @@ def activar_cancha(
     db: Session = Depends(get_db),
     current_user: Usuario = Depends(get_current_user)
 ):
-    """Activar una cancha previamente desactivada con control de permisos"""
+    """Activar una cancha previamente desactivada"""
     if not verificar_permiso_cancha(current_user, cancha_id, db):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

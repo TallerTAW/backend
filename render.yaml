@@ -1,0 +1,39 @@
+# render.yaml
+services:
+  - type: web
+    name: olympiahub-backend
+    env: python
+    region: ohio  # o virginia, oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      # Database (Supabase PostgreSQL)
+      - key: DATABASE_URL
+        sync: false
+      
+      # JWT
+      - key: SECRET_KEY
+        generateValue: true
+      
+      # reCAPTCHA
+      - key: RECAPTCHA_SECRET_KEY
+        sync: false
+      
+      # Supabase Storage
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      
+      # CORS (añade tu IP local si necesitas probar desde móvil)
+      - key: FRONTEND_URLS
+        value: http://localhost:5173,http://localhost:3000,capacitor://localhost
+      
+      # Entorno
+      - key: ENVIRONMENT
+        value: production

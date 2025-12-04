@@ -1,0 +1,18 @@
+# .renderignore
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+env/
+.venv/
+*.sqlite3
+*.db
+*.log
+.vscode/
+.idea/
+.git/
+static/uploads/
+static/qr_images/
+test_*.py

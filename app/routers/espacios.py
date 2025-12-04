@@ -1,3 +1,4 @@
+# app/routers/espacios.py
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from app.database import get_db
@@ -6,37 +7,10 @@ from app.schemas.espacio_deportivo import EspacioDeportivoResponse, EspacioDepor
 from app.models.usuario import Usuario
 from app.models.administra import Administra
 from app.core.security import get_current_user
-import uuid
-import os
-import shutil
-from typing import Optional, List
-from sqlalchemy import text, or_
+from app.services.supabase_storage import storage_service
+from typing import Optional
+from sqlalchemy import text
 from datetime import datetime
-
-# Configuración para uploads
-UPLOAD_DIR = "static/uploads/espacios"
-ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
-MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
-
-# Asegurar que el directorio existe
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-def allowed_file(filename: str) -> bool:
-    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-
-def save_uploaded_file(file: UploadFile) -> str:
-    """Guarda un archivo subido y retorna la ruta relativa"""
-    if not allowed_file(file.filename):
-        raise HTTPException(status_code=400, detail="Tipo de archivo no permitido")
-    
-    file_extension = file.filename.rsplit('.', 1)[1].lower()
-    unique_filename = f"{uuid.uuid4().hex}.{file_extension}"
-    file_path = os.path.join(UPLOAD_DIR, unique_filename)
-    
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-    
-    return f"/{UPLOAD_DIR}/{unique_filename}"
 
 router = APIRouter()
 
@@ -48,15 +22,10 @@ def get_espacios(
 ):
     """
     Obtener espacios deportivos según el rol del usuario
-    - Admin: ve todos los espacios con información del gestor y control de acceso
-    - Gestor/Control: ve solo los espacios que administra
     """
-    
     if current_user.rol == "admin":
-        # Admin ve todos los espacios
         espacios = db.query(EspacioDeportivo).all()
     elif current_user.rol in ["gestor", "control_acceso"]:
-        # Gestor o control_acceso ve solo los espacios donde está asignado
         espacios = db.query(EspacioDeportivo)\
             .join(Administra, EspacioDeportivo.id_espacio_deportivo == Administra.id_espacio_deportivo)\
             .filter(Administra.id_usuario == current_user.id_usuario)\
@@ -73,13 +42,11 @@ def get_espacios(
     # Enriquecer cada espacio con información de asignaciones
     espacios_enriquecidos = []
     for espacio in espacios:
-        # Obtener todos los usuarios asignados a este espacio
         usuarios_asignados = db.query(Usuario)\
             .join(Administra, Usuario.id_usuario == Administra.id_usuario)\
             .filter(Administra.id_espacio_deportivo == espacio.id_espacio_deportivo)\
             .all()
         
-        # Separar por rol
         gestor_info = None
         control_info = None
         
@@ -119,7 +86,6 @@ def get_espacio(
     current_user: Usuario = Depends(get_current_user)
 ):
     """Obtener un espacio específico con información de asignaciones"""
-    
     espacio = db.query(EspacioDeportivo).filter(EspacioDeportivo.id_espacio_deportivo == espacio_id).first()
     
     if not espacio:
@@ -127,7 +93,6 @@ def get_espacio(
     
     # Verificar permisos si no es admin
     if current_user.rol not in ["admin"] and current_user.rol in ["gestor", "control_acceso"]:
-        # Verificar si el usuario está asignado a este espacio
         asignacion = db.query(Administra).filter(
             Administra.id_espacio_deportivo == espacio_id,
             Administra.id_usuario == current_user.id_usuario
@@ -145,7 +110,6 @@ def get_espacio(
         .filter(Administra.id_espacio_deportivo == espacio_id)\
         .all()
     
-    # Separar por rol
     gestor_info = None
     control_info = None
     
@@ -184,13 +148,13 @@ async def create_espacio(
     descripcion: Optional[str] = Form(None),
     gestor_id: Optional[int] = Form(None),
     control_acceso_id: Optional[int] = Form(None),
-    latitud: float = Form(None),
-    longitud: float = Form(None),
+    latitud: Optional[float] = Form(None),
+    longitud: Optional[float] = Form(None),
     imagen: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
     current_user: Usuario = Depends(get_current_user)
 ):
-    """Crear espacio deportivo con imagen - SOLO ADMIN"""
+    """Crear espacio deportivo con imagen en Supabase"""
     
     if current_user.rol != "admin":
         raise HTTPException(
@@ -204,12 +168,21 @@ async def create_espacio(
         if existing_espacio:
             raise HTTPException(status_code=400, detail="Ya existe un espacio deportivo con ese nombre")
         
-        # Procesar imagen si se proporciona
-        imagen_path = None
+        # Procesar imagen usando Supabase Storage
+        imagen_url = None
         if imagen and imagen.size > 0:
-            if imagen.size > MAX_FILE_SIZE:
-                raise HTTPException(status_code=400, detail="La imagen es demasiado grande (máximo 5MB)")
-            imagen_path = save_uploaded_file(imagen)
+            try:
+                imagen_url = await storage_service.upload_image(
+                    file=imagen,
+                    folder="espacios"
+                )
+            except HTTPException as e:
+                raise e
+            except Exception as e:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Error al subir imagen: {str(e)}"
+                )
         
         # Crear el espacio
         nuevo_espacio = EspacioDeportivo(
@@ -219,7 +192,7 @@ async def create_espacio(
             descripcion=descripcion,
             latitud=latitud,
             longitud=longitud,
-            imagen=imagen_path
+            imagen=imagen_url  # URL de Supabase, no ruta local
         )
         
         db.add(nuevo_espacio)
@@ -235,25 +208,12 @@ async def create_espacio(
             ).first()
             
             if gestor:
-                # Verificar que no haya ya un gestor asignado
-                gestor_existente = db.query(Administra)\
-                    .join(Usuario, Administra.id_usuario == Usuario.id_usuario)\
-                    .filter(
-                        Administra.id_espacio_deportivo == nuevo_espacio.id_espacio_deportivo,
-                        Usuario.rol == "gestor"
-                    ).first()
-                
-                if gestor_existente:
-                    # Actualizar la asignación existente
-                    gestor_existente.id_usuario = gestor_id
-                else:
-                    # Crear nueva asignación
-                    nueva_asignacion = Administra(
-                        id_espacio_deportivo=nuevo_espacio.id_espacio_deportivo,
-                        id_usuario=gestor_id,
-                        fecha_asignacion=datetime.now()
-                    )
-                    db.add(nueva_asignacion)
+                nueva_asignacion = Administra(
+                    id_espacio_deportivo=nuevo_espacio.id_espacio_deportivo,
+                    id_usuario=gestor_id,
+                    fecha_asignacion=datetime.now()
+                )
+                db.add(nueva_asignacion)
         
         # ASIGNAR CONTROL DE ACCESO SI SE PROPORCIONÓ
         if control_acceso_id and control_acceso_id > 0:
@@ -264,30 +224,53 @@ async def create_espacio(
             ).first()
             
             if control:
-                # Verificar que no haya ya un control asignado
-                control_existente = db.query(Administra)\
-                    .join(Usuario, Administra.id_usuario == Usuario.id_usuario)\
-                    .filter(
-                        Administra.id_espacio_deportivo == nuevo_espacio.id_espacio_deportivo,
-                        Usuario.rol == "control_acceso"
-                    ).first()
-                
-                if control_existente:
-                    # Actualizar la asignación existente
-                    control_existente.id_usuario = control_acceso_id
-                else:
-                    # Crear nueva asignación
-                    nueva_asignacion = Administra(
-                        id_espacio_deportivo=nuevo_espacio.id_espacio_deportivo,
-                        id_usuario=control_acceso_id,
-                        fecha_asignacion=datetime.now()
-                    )
-                    db.add(nueva_asignacion)
+                nueva_asignacion = Administra(
+                    id_espacio_deportivo=nuevo_espacio.id_espacio_deportivo,
+                    id_usuario=control_acceso_id,
+                    fecha_asignacion=datetime.now()
+                )
+                db.add(nueva_asignacion)
         
         db.commit()
         
-        # Retornar el espacio creado con información de asignaciones
-        return get_espacio(nuevo_espacio.id_espacio_deportivo, db, current_user)
+        # Retornar el espacio creado
+        espacio = db.query(EspacioDeportivo).filter(
+            EspacioDeportivo.id_espacio_deportivo == nuevo_espacio.id_espacio_deportivo
+        ).first()
+        
+        # Obtener información de asignaciones
+        usuarios_asignados = db.query(Usuario)\
+            .join(Administra, Usuario.id_usuario == Administra.id_usuario)\
+            .filter(Administra.id_espacio_deportivo == espacio.id_espacio_deportivo)\
+            .all()
+        
+        gestor_info = None
+        control_info = None
+        
+        for usuario in usuarios_asignados:
+            if usuario.rol == "gestor":
+                gestor_info = usuario
+            elif usuario.rol == "control_acceso":
+                control_info = usuario
+        
+        return {
+            "id_espacio_deportivo": espacio.id_espacio_deportivo,
+            "nombre": espacio.nombre,
+            "ubicacion": espacio.ubicacion,
+            "capacidad": espacio.capacidad,
+            "descripcion": espacio.descripcion,
+            "imagen": espacio.imagen,
+            "estado": espacio.estado,
+            "latitud": espacio.latitud,
+            "longitud": espacio.longitud,
+            "fecha_creacion": espacio.fecha_creacion,
+            "gestor_id": gestor_info.id_usuario if gestor_info else None,
+            "gestor_nombre": gestor_info.nombre if gestor_info else None,
+            "gestor_apellido": gestor_info.apellido if gestor_info else None,
+            "control_acceso_id": control_info.id_usuario if control_info else None,
+            "control_acceso_nombre": control_info.nombre if control_info else None,
+            "control_acceso_apellido": control_info.apellido if control_info else None,
+        }
         
     except HTTPException:
         db.rollback()
@@ -311,7 +294,7 @@ async def update_espacio(
     db: Session = Depends(get_db),
     current_user: Usuario = Depends(get_current_user)
 ):
-    """Actualizar espacio deportivo - SOLO ADMIN"""
+    """Actualizar espacio deportivo con imagen en Supabase"""
     
     if current_user.rol != "admin":
         raise HTTPException(
@@ -347,19 +330,22 @@ async def update_espacio(
         if longitud is not None:
             espacio.longitud = longitud
         
-        # Procesar nueva imagen si se proporciona
+        # Procesar nueva imagen usando Supabase Storage
         if imagen and imagen.size > 0:
-            if imagen.size > MAX_FILE_SIZE:
-                raise HTTPException(status_code=400, detail="La imagen es demasiado grande (máximo 5MB)")
-            
-            # Eliminar imagen anterior si existe
-            if espacio.imagen and espacio.imagen.startswith(f"/{UPLOAD_DIR}/"):
-                old_image_path = espacio.imagen.lstrip('/')
-                if os.path.exists(old_image_path):
-                    os.remove(old_image_path)
-            
-            # Guardar nueva imagen
-            espacio.imagen = save_uploaded_file(imagen)
+            try:
+                # Subir nueva imagen
+                imagen_url = await storage_service.upload_image(
+                    file=imagen,
+                    folder="espacios"
+                )
+                espacio.imagen = imagen_url
+            except HTTPException as e:
+                raise e
+            except Exception as e:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Error al actualizar imagen: {str(e)}"
+                )
         
         # GESTIÓN DE ASIGNACIONES DE GESTOR
         if gestor_id is not None:
@@ -438,10 +424,43 @@ async def update_espacio(
                     db.delete(control_actual)
         
         db.commit()
-        db.refresh(espacio)
         
-        # Retornar el espacio actualizado con información de asignaciones
-        return get_espacio(espacio_id, db, current_user)
+        # Obtener información actualizada
+        espacio = db.query(EspacioDeportivo).filter(EspacioDeportivo.id_espacio_deportivo == espacio_id).first()
+        
+        # Obtener usuarios asignados
+        usuarios_asignados = db.query(Usuario)\
+            .join(Administra, Usuario.id_usuario == Administra.id_usuario)\
+            .filter(Administra.id_espacio_deportivo == espacio_id)\
+            .all()
+        
+        gestor_info = None
+        control_info = None
+        
+        for usuario in usuarios_asignados:
+            if usuario.rol == "gestor":
+                gestor_info = usuario
+            elif usuario.rol == "control_acceso":
+                control_info = usuario
+        
+        return {
+            "id_espacio_deportivo": espacio.id_espacio_deportivo,
+            "nombre": espacio.nombre,
+            "ubicacion": espacio.ubicacion,
+            "capacidad": espacio.capacidad,
+            "descripcion": espacio.descripcion,
+            "imagen": espacio.imagen,
+            "estado": espacio.estado,
+            "latitud": espacio.latitud,
+            "longitud": espacio.longitud,
+            "fecha_creacion": espacio.fecha_creacion,
+            "gestor_id": gestor_info.id_usuario if gestor_info else None,
+            "gestor_nombre": gestor_info.nombre if gestor_info else None,
+            "gestor_apellido": gestor_info.apellido if gestor_info else None,
+            "control_acceso_id": control_info.id_usuario if control_info else None,
+            "control_acceso_nombre": control_info.nombre if control_info else None,
+            "control_acceso_apellido": control_info.apellido if control_info else None,
+        }
         
     except HTTPException:
         db.rollback()
@@ -451,13 +470,12 @@ async def update_espacio(
         raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
 
 @router.delete("/{espacio_id}")
-def desactivar_espacio(
+async def desactivar_espacio(
     espacio_id: int, 
     db: Session = Depends(get_db),
     current_user: Usuario = Depends(get_current_user)
 ):
-    """Desactivar espacio deportivo (borrado lógico) - SOLO ADMIN"""
-    
+    """Desactivar espacio deportivo (borrado lógico)"""
     if current_user.rol != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -470,6 +488,10 @@ def desactivar_espacio(
     
     if espacio.estado == "inactivo":
         raise HTTPException(status_code=400, detail="El espacio deportivo ya está inactivo")
+    
+    # OPCIONAL: Eliminar imagen de Supabase si se desactiva
+    # if espacio.imagen and "supabase.co/storage" in espacio.imagen:
+    #     await storage_service.delete_file(espacio.imagen)
     
     espacio.estado = "inactivo"
     db.commit()
