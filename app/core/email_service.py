@@ -18,7 +18,7 @@ def send_email(to_email: str, subject: str, message: str, html_content: str = No
         print(f"📧 [RESEND] Enviando email a: {to_email}")
         
         params = {
-            "from": "leandroeguerdo@gmail.com",
+            "from": "OlympiaHub <onboarding@resend.dev>",
             "to": [to_email],
             "subject": subject,
             "text": message,
