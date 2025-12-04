@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile, File, Form
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import text
 from datetime import date
 from app.database import get_db
@@ -564,7 +564,9 @@ def get_canchas_por_espacio_public(espacio_id: int, db: Session = Depends(get_db
 @router.get("/public/{cancha_id}", response_model=CanchaResponse)
 def get_cancha_public(cancha_id: int, db: Session = Depends(get_db)):
     """Obtener una cancha específica por ID (público para reservas)"""
-    cancha = db.query(Cancha).filter(
+    cancha = db.query(Cancha).options(
+        joinedload(Cancha.espacio_deportivo)
+    ).filter(
         Cancha.id_cancha == cancha_id,
         Cancha.estado == "disponible"
     ).first()

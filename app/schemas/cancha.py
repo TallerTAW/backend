@@ -4,6 +4,8 @@ from typing import Optional, List
 from datetime import time, datetime  # ← Añadir datetime
 from decimal import Decimal
 
+from .espacio_deportivo import EspacioDeportivoResponse
+
 class CanchaBase(BaseModel):
     nombre: str = Field(..., min_length=1, max_length=100, description="Nombre de la cancha")
     tipo: Optional[str] = Field(None, max_length=50, description="Tipo de cancha (Fútbol, Básquetbol, etc.)")
@@ -30,6 +32,8 @@ class CanchaUpdate(BaseModel):
 class CanchaResponse(CanchaBase):
     id_cancha: int
     fecha_creacion: datetime  # ← Cambiar de str a datetime
+
+    espacio_deportivo: Optional[EspacioDeportivoResponse] = None 
     
     class Config:
         from_attributes = True
