@@ -11,41 +11,40 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
 from pathlib import Path
+import resend
 
 # Configuración
 IMG_BB_API_KEY = "15132cfb77719e5061c3278a7fce1a17"  # TU API KEY AQUÍ
+resend.api_key = "re_2DMkEMqu_9LGx97eTPHSf2dfVbbK2fzh2"
 
-def send_email(to_email: str, subject: str, message: str):
+def send_email(to_email: str, subject: str, message: str, html_content: str = None):
+    """
+    Envía email usando Resend API
+    """
     try:
-        sender_email = "leandroeguerdo@gmail.com"
-        password = "otzxgnihrdjrysbo"  
+        print(f"📧 [RESEND] Enviando email a: {to_email}")
         
-        print(f"🎯 ENVIANDO EMAIL:")
-        print(f"   De: {sender_email}")
-        print(f"   A: {to_email}")
-        print(f"   Asunto: {subject}")
+        params = {
+            "from": "OlympiaHub <no-reply@olympiahub.app>",
+            "to": [to_email],
+            "subject": subject,
+            "text": message,
+        }
         
-        # Crear mensaje
-        email_text = f"Subject: {subject}\nFrom: {sender_email}\nTo: {to_email}\n\n{message}"
+        if html_content:
+            params["html"] = html_content
         
-        # Enviar con más detalles
-        server = smtplib.SMTP("smtp.gmail.com", 587)
-        server.ehlo()
-        server.starttls()
-        server.ehlo()
-        server.login(sender_email, password)
-        server.sendmail(sender_email, to_email, email_text)
-        server.quit()
+        email = resend.Emails.send(params)
         
-        print(f"✅ ✅ ✅ EMAIL ENVIADO EXITOSAMENTE a: {to_email}")
+        print(f"✅ [RESEND] Email enviado. ID: {email['id']}")
         return True
         
     except Exception as e:
-        print(f"❌ ❌ ❌ ERROR ENVIANDO EMAIL: {e}")
+        print(f"❌ [RESEND] Error: {e}")
         return False
 
 def generate_qr_image(qr_data: str):
-    """Genera una imagen QR y la devuelve como bytes"""
+    """Genera una imagen QR"""
     qr = qrcode.QRCode(
         version=1,
         error_correction=qrcode.constants.ERROR_CORRECT_L,
@@ -57,10 +56,13 @@ def generate_qr_image(qr_data: str):
     
     img = qr.make_image(fill_color="black", back_color="white")
     
-    # Convertir a bytes
     buffered = io.BytesIO()
     img.save(buffered, format="PNG")
-    return buffered.getvalue()
+    qr_bytes = buffered.getvalue()
+    
+    # Convertir a base64 para Resend
+    qr_base64 = base64.b64encode(qr_bytes).decode()
+    return qr_base64
 
 def upload_qr_to_imgbb(qr_image_bytes: bytes) -> str:
     """
@@ -99,311 +101,95 @@ def upload_qr_to_imgbb(qr_image_bytes: bytes) -> str:
 
 def send_qr_email(to_email: str, datos: dict):
     """
-    Envía email con código QR usando ImgBB
+    Envía email con QR usando Resend
     """
     try:
-        sender_email = "leandroeguerdo@gmail.com"
-        password = "otzxgnihrdjrysbo"
+        print(f"🎟️ [RESEND] Enviando QR email a: {to_email}")
         
-        print(f"🎯 ENVIANDO EMAIL CON QR:")
-        print(f"   De: {sender_email}")
-        print(f"   A: {to_email}")
-        
-        # Generar QR con los datos
+        # Generar QR
         qr_data = f"{datos['codigo_qr']}|{datos['token_verificacion']}"
+        qr_base64 = generate_qr_image(qr_data)
         
-        # Generar imagen QR
-        qr_image_bytes = generate_qr_image(qr_data)
-        
-        # Subir a ImgBB
-        qr_url = upload_qr_to_imgbb(qr_image_bytes)
-        
-        # Si falla ImgBB, usar base64 como fallback
-        if not qr_url:
-            print("⚠️ Usando base64 como fallback...")
-            qr_base64 = base64.b64encode(qr_image_bytes).decode()
-            qr_url = f"data:image/png;base64,{qr_base64}"
-        
-        # Formatear fecha
-        fecha = datos['fecha_reserva']
-        
-        # Crear contenido HTML del email
+        # HTML con QR embebido
         html_content = f"""
         <!DOCTYPE html>
         <html>
         <head>
             <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Tu QR para la reserva en {datos['nombre_cancha']}</title>
             <style>
-                body {{
-                    font-family: 'Arial', sans-serif;
-                    line-height: 1.6;
-                    color: #333;
-                    max-width: 600px;
-                    margin: 0 auto;
-                    padding: 20px;
-                    background-color: #f8f9fa;
-                }}
-                .container {{
-                    background: white;
-                    border-radius: 10px;
-                    overflow: hidden;
-                    box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-                }}
-                .header {{
-                    background: linear-gradient(135deg, #0f9fe1 0%, #9eca3f 100%);
-                    color: white;
-                    padding: 25px 20px;
-                    text-align: center;
-                }}
-                .header h1 {{
-                    margin: 0;
-                    font-size: 24px;
-                }}
-                .content {{
-                    padding: 30px;
-                }}
-                .greeting {{
-                    font-size: 18px;
-                    margin-bottom: 20px;
-                    color: #1a237e;
-                }}
-                .info-card {{
-                    background: #f0f7ff;
-                    padding: 20px;
-                    border-radius: 8px;
-                    margin: 20px 0;
-                    border-left: 5px solid #0f9fe1;
-                }}
-                .info-card h3 {{
-                    color: #0f9fe1;
-                    margin-top: 0;
-                    font-size: 18px;
-                }}
-                .info-item {{
-                    margin: 10px 0;
-                    display: flex;
-                }}
-                .info-label {{
-                    font-weight: bold;
-                    min-width: 120px;
-                    color: #1a237e;
-                }}
-                .qr-section {{
-                    text-align: center;
-                    margin: 30px 0;
-                    padding: 20px;
-                    background: #f8f9fa;
-                    border-radius: 8px;
-                    border: 2px dashed #0f9fe1;
-                }}
-                .qr-section h3 {{
-                    color: #0f9fe1;
-                    margin-bottom: 15px;
-                }}
-                .qr-image {{
-                    max-width: 250px;
-                    height: auto;
-                    border: 1px solid #ddd;
-                    border-radius: 8px;
-                    padding: 10px;
-                    background: white;
-                    box-shadow: 0 2px 8px rgba(0,0,0,0.1);
-                }}
-                .instructions {{
-                    background: #e8f5e9;
-                    padding: 15px;
-                    border-radius: 8px;
-                    margin: 20px 0;
-                    border-left: 5px solid #4caf50;
-                }}
-                .instructions h4 {{
-                    color: #2e7d32;
-                    margin-top: 0;
-                }}
-                .instructions ol {{
-                    padding-left: 20px;
-                }}
-                .instructions li {{
-                    margin: 8px 0;
-                }}
-                .footer {{
-                    margin-top: 30px;
-                    padding-top: 20px;
-                    border-top: 1px solid #ddd;
-                    color: #666;
-                    font-size: 12px;
-                    text-align: center;
-                }}
-                .qr-code-text {{
-                    font-family: monospace;
-                    background: #f5f5f5;
-                    padding: 10px;
-                    border-radius: 4px;
-                    margin: 10px 0;
-                    word-break: break-all;
-                    font-size: 12px;
-                }}
-                .button {{
-                    display: inline-block;
-                    padding: 10px 20px;
-                    background: #0f9fe1;
-                    color: white;
-                    text-decoration: none;
-                    border-radius: 5px;
-                    margin: 10px 0;
-                    font-weight: bold;
-                }}
+                body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+                .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+                .header {{ background: #00BFFF; color: white; padding: 20px; text-align: center; }}
+                .content {{ padding: 20px; background: #f9f9f9; }}
+                .qr-section {{ text-align: center; margin: 20px 0; }}
+                .qr-image {{ max-width: 250px; height: auto; }}
             </style>
         </head>
         <body>
             <div class="container">
                 <div class="header">
-                    <h1>🎟️ Tu Código QR para la Reserva</h1>
+                    <h1>🎟️ Tu Código QR - OlympiaHub</h1>
                 </div>
-                
                 <div class="content">
-                    <div class="greeting">
-                        Hola <strong>{datos['nombre_asistente']}</strong>,
-                    </div>
+                    <p>Hola <strong>{datos['nombre_asistente']}</strong>,</p>
+                    <p><strong>{datos['nombre_reservante']}</strong> te ha incluido como asistente.</p>
                     
-                    <p><strong>{datos['nombre_reservante']}</strong> te ha incluido como asistente para la siguiente reserva:</p>
-                    
-                    <div class="info-card">
+                    <div style="background: white; padding: 15px; border-radius: 8px; margin: 20px 0;">
                         <h3>📋 Detalles de la Reserva</h3>
-                        <div class="info-item">
-                            <span class="info-label">Cancha:</span>
-                            <span>{datos['nombre_cancha']}</span>
-                        </div>
-                        <div class="info-item">
-                            <span class="info-label">Fecha:</span>
-                            <span>{fecha}</span>
-                        </div>
-                        <div class="info-item">
-                            <span class="info-label">Horario:</span>
-                            <span>{datos['hora_inicio']} - {datos['hora_fin']}</span>
-                        </div>
-                        <div class="info-item">
-                            <span class="info-label">Código Reserva:</span>
-                            <span>{datos['codigo_reserva']}</span>
-                        </div>
+                        <p><strong>Cancha:</strong> {datos['nombre_cancha']}</p>
+                        <p><strong>Fecha:</strong> {datos['fecha_reserva']}</p>
+                        <p><strong>Horario:</strong> {datos['hora_inicio']} - {datos['hora_fin']}</p>
+                        <p><strong>Código Reserva:</strong> {datos['codigo_reserva']}</p>
                     </div>
                     
                     <div class="qr-section">
                         <h3>📱 Tu Código QR Personal</h3>
-                        <p>Presenta este código QR al personal de control de acceso:</p>
-                        
-                        <!-- Imagen QR desde ImgBB -->
-                        <img src="{qr_url}" alt="Código QR para {datos['codigo_qr']}" class="qr-image" />
-                        
-                        <div class="qr-code-text">
-                            <strong>Código:</strong> {datos['codigo_qr']}<br>
-                            <strong>Token:</strong> {datos['token_verificacion']}
-                        </div>
-                        
-                        <a href="{qr_url}" class="button" target="_blank">🔗 Ver QR en tamaño completo</a>
+                        <img src="data:image/png;base64,{qr_base64}" alt="Código QR" class="qr-image" />
+                        <p><strong>Código:</strong> {datos['codigo_qr']}</p>
+                        <p><strong>Token:</strong> {datos['token_verificacion']}</p>
                     </div>
                     
-                    <div class="instructions">
-                        <h4>📝 Instrucciones de Uso</h4>
-                        <ol>
-                            <li>Lleva este email contigo (puedes mostrarlo desde tu teléfono)</li>
-                            <li>Presenta el código QR al personal de control de acceso</li>
-                            <li>Si el QR no se ve, usa los códigos de texto mostrados arriba</li>
-                            <li>Tu asistencia será registrada automáticamente</li>
-                            <li>Este código es de un solo uso y personal</li>
-                        </ol>
-                    </div>
-                    
-                    <p style="text-align: center; font-size: 16px; color: #1a237e; margin-top: 25px;">
+                    <p style="text-align: center; margin-top: 30px;">
                         <strong>¡Te esperamos en {datos['nombre_cancha']}!</strong>
                     </p>
-                </div>
-                
-                <div class="footer">
-                    <p>Este es un mensaje automático, por favor no respondas a este email.</p>
-                    <p>© {datetime.now().year} Sistema de Reservas Deportivas - OlympiaHub</p>
-                    <p>ID de reserva: {datos['codigo_reserva']}</p>
                 </div>
             </div>
         </body>
         </html>
         """
         
-        # Crear mensaje MIME
-        msg = MIMEMultipart('alternative')
-        msg['Subject'] = f"🎟️ Tu código QR para la reserva en {datos['nombre_cancha']}"
-        msg['From'] = sender_email
-        msg['To'] = to_email
-        
-        # Versión texto plano (fallback)
+        # Texto plano (fallback)
         text_content = f"""
-        Tu código QR para la reserva en {datos['nombre_cancha']}
+        Tu código QR para la reserva
         
         Hola {datos['nombre_asistente']},
         
         {datos['nombre_reservante']} te ha incluido como asistente para:
         
         Cancha: {datos['nombre_cancha']}
-        Fecha: {fecha}
+        Fecha: {datos['fecha_reserva']}
         Horario: {datos['hora_inicio']} - {datos['hora_fin']}
-        Código de Reserva: {datos['codigo_reserva']}
+        Código Reserva: {datos['codigo_reserva']}
         
         Tu código QR: {datos['codigo_qr']}
-        Token de verificación: {datos['token_verificacion']}
+        Token: {datos['token_verificacion']}
         
-        Enlace al QR: {qr_url if 'http' in str(qr_url) else 'Está incrustado en el email'}
+        Presenta estos códigos al personal de control de acceso.
         
-        Presenta el código QR o los códigos de texto al personal de control de acceso.
-        
-        ¡Te esperamos en {datos['nombre_cancha']}!
-        
-        ---
-        Este es un mensaje automático, por favor no respondas.
+        ¡Te esperamos!
         """
         
-        # Adjuntar ambas versiones
-        msg.attach(MIMEText(text_content, 'plain'))
-        msg.attach(MIMEText(html_content, 'html'))
-        
-        # Enviar email
-        with smtplib.SMTP("smtp.gmail.com", 587) as server:
-            server.starttls()
-            server.login(sender_email, password)
-            server.send_message(msg)
-        
-        print(f"✅ ✅ ✅ EMAIL CON QR ENVIADO EXITOSAMENTE a: {to_email}")
-        return True
+        # Enviar con Resend
+        return send_email(
+            to_email=to_email,
+            subject=f"🎟️ Tu código QR para {datos['nombre_cancha']} - {datos['codigo_reserva']}",
+            message=text_content,
+            html_content=html_content
+        )
         
     except Exception as e:
-        print(f"❌ ❌ ❌ ERROR ENVIANDO EMAIL CON QR: {e}")
-        import traceback
-        traceback.print_exc()
-        
-        # Envío simple como fallback
-        try:
-            simple_subject = f"Tu código QR para la reserva en {datos['nombre_cancha']}"
-            simple_message = f"""
-            Hola {datos['nombre_asistente']},
-            
-            Tu código QR para la reserva en {datos['nombre_cancha']} es:
-            
-            Código QR: {datos['codigo_qr']}
-            Token: {datos['token_verificacion']}
-            
-            Fecha: {fecha}
-            Horario: {datos['hora_inicio']} - {datos['hora_fin']}
-            Código Reserva: {datos['codigo_reserva']}
-            
-            Presenta estos códigos al personal de control de acceso.
-            
-            ¡Te esperamos en {datos['nombre_cancha']}!
-            """
-            return send_email(to_email, simple_subject, simple_message)
-        except Exception as e2:
-            print(f"❌ Falló el envío simple: {e2}")
-            return False
+        print(f"❌ [RESEND] Error enviando QR email: {e}")
+        return False
 
 # Función alternativa con attachment (más confiable para algunos clientes)
 def send_qr_email_with_attachment(to_email: str, datos: dict):
@@ -486,26 +272,37 @@ def send_qr_email_with_attachment(to_email: str, datos: dict):
 # Funciones auxiliares
 def send_welcome_email(to_email: str, nombre: str, apellido: str):
     subject = "Bienvenido a OlympiaHub - Cuenta Pendiente"
-    message = f"""Hola {nombre},
-
-Tu registro en OlympiaHub fue exitoso. Tu cuenta esta pendiente de aprobacion.
-
-Te notificaremos cuando sea activada.
-
-Saludos,
-Equipo OlympiaHub"""
-    return send_email(to_email, subject, message)
+    message = f"Hola {nombre},\n\nTu registro fue exitoso. Tu cuenta está pendiente de aprobación.\n\nSaludos,\nEquipo OlympiaHub"
+    
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <body style="font-family: Arial, sans-serif; line-height: 1.6;">
+        <h2>Bienvenido a OlympiaHub, {nombre}!</h2>
+        <p>Tu registro fue exitoso. Tu cuenta está pendiente de aprobación.</p>
+        <p>Te notificaremos cuando sea activada.</p>
+        <p>Saludos,<br>Equipo OlympiaHub</p>
+    </body>
+    </html>
+    """
+    
+    return send_email(to_email, subject, message, html_content)
 
 def send_approval_email(to_email: str, nombre: str, apellido: str, rol: str):
-    subject = "Cuenta Aprobada - OlympiaHub!"
-    message = f"""Felicidades {nombre}!
-
-Tu cuenta en OlympiaHub ha sido aprobada.
-
-Rol: {rol}
-
-Ya puedes iniciar sesion y usar la plataforma.
-
-Bienvenid@,
-Equipo OlympiaHub"""
-    return send_email(to_email, subject, message)
+    subject = "✅ Tu cuenta ha sido aprobada - OlympiaHub"
+    message = f"Felicidades {nombre}!\n\nTu cuenta ha sido aprobada.\n\nRol: {rol}\n\nYa puedes iniciar sesión."
+    
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <body style="font-family: Arial, sans-serif; line-height: 1.6;">
+        <h2 style="color: #00BFFF;">¡Felicidades {nombre}!</h2>
+        <p>Tu cuenta en OlympiaHub ha sido aprobada.</p>
+        <p><strong>Rol:</strong> {rol}</p>
+        <p>Ya puedes iniciar sesión y usar la plataforma.</p>
+        <p>Bienvenid@ al equipo!</p>
+    </body>
+    </html>
+    """
+    
+    return send_email(to_email, subject, message, html_content)
