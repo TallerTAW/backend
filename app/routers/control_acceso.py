@@ -81,7 +81,6 @@ def verificar_qr_asistente(
             
             # Mensaje específico para estado "pendiente"
             if reserva.estado == "pendiente":
-                # ✅ AGREGAR INFORMACIÓN DE LA RESERVA EN EL ERROR
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail={
@@ -90,7 +89,7 @@ def verificar_qr_asistente(
                             "id_reserva": reserva.id_reserva,
                             "codigo_reserva": reserva.codigo_reserva,
                             "fecha": reserva.fecha_reserva.strftime("%d/%m/%Y"),
-                            "horario": f"{reserva.hora_inicio.strftime('%H:%M')} - {reserva.hora_fin.strftime('%H:%M')}",
+                            "horario": f"{reserva.hora_inicio} - {reserva.hora_fin}",
                             "cancha": reserva.cancha.nombre if reserva.cancha else "N/A",
                             "estado_actual": reserva.estado
                         },
@@ -117,7 +116,7 @@ def verificar_qr_asistente(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
-                    "message": f"La reserva es para el {reserva.fecha_reserva}, no puede validar hoy ({fecha_hoy})",
+                    "message": f"La reserva es para el {reserva.fecha_reserva.strftime('%d/%m/%Y')}, no puede validar hoy ({fecha_hoy.strftime('%d/%m/%Y')})",
                     "reserva_info": {
                         "id_reserva": reserva.id_reserva,
                         "fecha_reserva": reserva.fecha_reserva.strftime("%d/%m/%Y")
@@ -125,23 +124,48 @@ def verificar_qr_asistente(
                 }
             )
         
-        # Verificar horario (puede llegar hasta 30 minutos antes y después)
+        # CORRECCIÓN: Calcular los horarios permitidos correctamente
         hora_actual = datetime.now().time()
-        hora_inicio_30min_antes = (
-            datetime.combine(date.today(), reserva.hora_inicio) - timedelta(minutes=30)
-        ).time()
-        hora_fin_30min_despues = (
-            datetime.combine(date.today(), reserva.hora_fin) + timedelta(minutes=30)
-        ).time()
         
-        if not (hora_inicio_30min_antes <= hora_actual <= hora_fin_30min_despues):
+        # Convertir hora_inicio y hora_fin a datetime para poder hacer operaciones
+        hora_inicio_dt = datetime.combine(date.today(), reserva.hora_inicio)
+        hora_fin_dt = datetime.combine(date.today(), reserva.hora_fin)
+        
+        # Calcular límites con 30 minutos de tolerancia
+        hora_inicio_30min_antes_dt = hora_inicio_dt - timedelta(minutes=30)
+        hora_fin_30min_despues_dt = hora_fin_dt + timedelta(minutes=30)
+        
+        # Convertir de nuevo a time
+        hora_inicio_30min_antes = hora_inicio_30min_antes_dt.time()
+        hora_fin_30min_despues = hora_fin_30min_despues_dt.time()
+        
+        logger.info(f"🕐 Hora actual: {hora_actual}")
+        logger.info(f"🕐 Reserva: {reserva.hora_inicio} - {reserva.hora_fin}")
+        logger.info(f"🕐 Permitido entre: {hora_inicio_30min_antes} - {hora_fin_30min_despues}")
+        
+        # Verificar si está dentro del horario permitido
+        if hora_actual < hora_inicio_30min_antes:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={
-                    "message": f"Solo puede validar entre {hora_inicio_30min_antes} y {hora_fin_30min_despues}",
+                    "message": f"No puede validar todavía. Puede validar desde {hora_inicio_30min_antes.strftime('%H:%M')}",
                     "reserva_info": {
                         "id_reserva": reserva.id_reserva,
-                        "horario_permitido": f"{hora_inicio_30min_antes} - {hora_fin_30min_despues}"
+                        "horario_reserva": f"{reserva.hora_inicio} - {reserva.hora_fin}",
+                        "puede_validar_desde": hora_inicio_30min_antes.strftime("%H:%M")
+                    }
+                }
+            )
+        
+        if hora_actual > hora_fin_30min_despues:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "message": f"Ya pasó el tiempo para validar. Podía validar hasta {hora_fin_30min_despues.strftime('%H:%M')}",
+                    "reserva_info": {
+                        "id_reserva": reserva.id_reserva,
+                        "horario_reserva": f"{reserva.hora_inicio} - {reserva.hora_fin}",
+                        "podia_validar_hasta": hora_fin_30min_despues.strftime("%H:%M")
                     }
                 }
             )
