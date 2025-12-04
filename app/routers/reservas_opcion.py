@@ -23,6 +23,7 @@ import string
 from sqlalchemy import text
 import uuid
 import secrets
+from app.core.security import get_current_user
 
 
 router = APIRouter()
@@ -54,8 +55,6 @@ def calcular_costo_total(hora_inicio: time, hora_fin: time, precio_por_hora: flo
     duracion_horas = duracion_minutos / 60.0
     return round(duracion_horas * precio_por_hora, 2)
 
-# ========== ENDPOINTS BÁSICOS DE RESERVAS (del archivo reservas.py) ==========
-
 @router.get("/", response_model=List[ReservaResponse])
 def get_reservas(
     skip: int = 0,
@@ -65,16 +64,48 @@ def get_reservas(
     fecha_fin: Optional[date] = None,
     id_usuario: Optional[int] = None,
     id_cancha: Optional[int] = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user)
 ):
-    """Obtener lista de reservas con filtros opcionales y relaciones cargadas"""
-    query = db.query(Reserva).options(
-        joinedload(Reserva.usuario),
-        joinedload(Reserva.cancha).joinedload(Cancha.espacio_deportivo),
-        joinedload(Reserva.disciplina)
-    )
+    """Obtener lista de reservas con filtros opcionales y control de permisos"""
     
-    # Aplicar filtros
+    if current_user.rol == "admin":
+        # Admin ve todas las reservas
+        query = db.query(Reserva)
+        
+    elif current_user.rol in ["gestor", "control_acceso"]:
+        # Gestor/control_acceso ve solo reservas de sus espacios
+        
+        # 1. Obtener espacios donde el usuario está asignado
+        espacios_gestor = db.query(Administra).filter(
+            Administra.id_usuario == current_user.id_usuario
+        ).all()
+        
+        espacios_ids = [espacio.id_espacio_deportivo for espacio in espacios_gestor]
+        
+        if not espacios_ids:
+            return []
+        
+        # 2. Obtener canchas que pertenecen a esos espacios
+        canchas_espacios = db.query(Cancha).filter(
+            Cancha.id_espacio_deportivo.in_(espacios_ids)
+        ).all()
+        
+        canchas_ids = [cancha.id_cancha for cancha in canchas_espacios]
+        
+        if not canchas_ids:
+            return []
+        
+        # 3. Filtrar reservas por esas canchas
+        query = db.query(Reserva).filter(Reserva.id_cancha.in_(canchas_ids))
+        
+    else:
+        # Clientes no pueden ver todas las reservas
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes permisos para ver reservas"
+        )
+    
     if estado:
         query = query.filter(Reserva.estado == estado)
     
@@ -90,21 +121,28 @@ def get_reservas(
     if id_cancha:
         query = query.filter(Reserva.id_cancha == id_cancha)
     
-    reservas = query.offset(skip).limit(limit).all()
+    reservas = query.options(
+        joinedload(Reserva.usuario),
+        joinedload(Reserva.cancha).joinedload(Cancha.espacio_deportivo),
+        joinedload(Reserva.disciplina)
+    ).offset(skip).limit(limit).all()
     
-    # ✅ VALIDACIÓN ADICIONAL: Loggear si hay reservas sin código (para debugging)
     reservas_sin_codigo = [r for r in reservas if not r.codigo_reserva]
     if reservas_sin_codigo:
         print(f"⚠️  ADVERTENCIA: {len(reservas_sin_codigo)} reservas sin código")
-        # Generar códigos temporales para evitar errores en frontend
         for reserva in reservas_sin_codigo:
             reserva.codigo_reserva = f"TEMP-{reserva.id_reserva}"
     
     return reservas
 
 @router.get("/{reserva_id}", response_model=ReservaResponse)
-def get_reserva(reserva_id: int, db: Session = Depends(get_db)):
-    """Obtener una reserva específica por ID con relaciones"""
+def get_reserva(
+    reserva_id: int, 
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user)
+):
+    """Obtener una reserva específica por ID con relaciones y control de permisos"""
+    
     reserva = db.query(Reserva).options(
         joinedload(Reserva.usuario),
         joinedload(Reserva.cancha).joinedload(Cancha.espacio_deportivo),
@@ -114,7 +152,32 @@ def get_reserva(reserva_id: int, db: Session = Depends(get_db)):
     if not reserva:
         raise HTTPException(status_code=404, detail="Reserva no encontrada")
     
-    # ✅ VALIDACIÓN: Verificar que tenga código
+    if current_user.rol not in ["admin"] and current_user.rol in ["gestor", "control_acceso"]:
+        # Si no es admin pero es gestor o control_acceso, verificar permisos
+        
+        try:
+            # Obtener el espacio deportivo de la cancha de la reserva
+            espacio_id = reserva.cancha.id_espacio_deportivo
+            
+            # Verificar si el usuario está asignado a ese espacio
+            asignacion = db.query(Administra).filter(
+                Administra.id_espacio_deportivo == espacio_id,
+                Administra.id_usuario == current_user.id_usuario
+            ).first()
+            
+            if not asignacion:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="No tienes permisos para ver esta reserva"
+                )
+                
+        except AttributeError:
+            # Si no se puede obtener el espacio_id
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="No tienes permisos para ver esta reserva"
+            )
+    
     if not reserva.codigo_reserva:
         print(f"⚠️  ADVERTENCIA: Reserva {reserva_id} sin código_reserva")
         reserva.codigo_reserva = f"TEMP-{reserva_id}"
@@ -851,9 +914,17 @@ def get_reservas_gestor(
     skip: int = 0,
     limit: int = 100,
     estado: Optional[str] = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user) 
 ):
     """Obtener reservas solo para los espacios deportivos del gestor"""
+    
+    if current_user.id_usuario != gestor_id and current_user.rol != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Solo puedes ver tus propias reservas de gestor"
+        )
+    
     print(f"👨‍💼 [BACKEND] Obteniendo reservas para gestor {gestor_id}")
     
     espacios_gestor = db.query(Administra).filter(
@@ -894,6 +965,10 @@ def get_reservas_gestor(
     reservas = query.order_by(Reserva.fecha_reserva.desc()).offset(skip).limit(limit).all()
     
     print(f"✅ [BACKEND] Encontradas {len(reservas)} reservas para gestor {gestor_id}")
+    
+    for reserva in reservas:
+        if not reserva.codigo_reserva:
+            reserva.codigo_reserva = f"TEMP-{reserva.id_reserva}"
     
     return reservas
 
