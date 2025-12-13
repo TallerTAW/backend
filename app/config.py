@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     SUPABASE_URL: str
     SUPABASE_KEY: str           # anon public key
     SUPABASE_SERVICE_KEY: str   # service_role key
+
+    #email senders
+    IMG_BB_API_KEY: str
+    BREVO_API_KEY: str
+    SENDER_EMAIL: str
     
     # CORS
     FRONTEND_URLS: str = "http://localhost:5173,http://localhost:3000,capacitor://localhost,http://localhost"

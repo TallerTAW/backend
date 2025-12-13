@@ -4,36 +4,54 @@ import base64
 import uuid
 import requests
 from datetime import datetime
-import resend
+import os
+from app.config import settings
 
 # Configuración
-IMG_BB_API_KEY = "15132cfb77719e5061c3278a7fce1a17"  # TU API KEY AQUÍ
-resend.api_key = "re_2DMkEMqu_9LGx97eTPHSf2dfVbbK2fzh2"
+IMG_BB_API_KEY = settings.IMG_BB_API_KEY
+BREVO_API_KEY = settings.BREVO_API_KEY
+SENDER_EMAIL = settings.SENDER_EMAIL
+SENDER_NAME = "OlympiaHub"
 
 def send_email(to_email: str, subject: str, message: str, html_content: str = None):
     """
-    Envía email usando Resend API
+    Envía email usando Brevo API
     """
     try:
-        print(f"📧 [RESEND] Enviando email a: {to_email}")
+        print(f"📧 [BREVO] Enviando email a: {to_email}")
         
-        params = {
-            "from": "OlympiaHub <onboarding@resend.dev>",
-            "to": [to_email],
+        url = "https://api.brevo.com/v3/smtp/email"
+        
+        headers = {
+            "accept": "application/json",
+            "api-key": BREVO_API_KEY,
+            "content-type": "application/json"
+        }
+        
+        data = {
+            "sender": {
+                "name": SENDER_NAME,
+                "email": SENDER_EMAIL
+            },
+            "to": [{"email": to_email}],
             "subject": subject,
-            "text": message,
+            "textContent": message
         }
         
         if html_content:
-            params["html"] = html_content
+            data["htmlContent"] = html_content
         
-        email = resend.Emails.send(params)
+        response = requests.post(url, headers=headers, json=data)
         
-        print(f"✅ [RESEND] Email enviado. ID: {email['id']}")
-        return True
-        
+        if response.status_code == 201:
+            print(f"✅ [BREVO] Email enviado exitosamente")
+            return True
+        else:
+            print(f"❌ [BREVO] Error {response.status_code}: {response.text}")
+            return False
+            
     except Exception as e:
-        print(f"❌ [RESEND] Error: {e}")
+        print(f"❌ [BREVO] Error: {e}")
         return False
 
 def generate_qr_image(qr_data: str):
@@ -49,7 +67,6 @@ def generate_qr_image(qr_data: str):
     
     img = qr.make_image(fill_color="black", back_color="white")
     
-    # Convertir a bytes
     buffered = io.BytesIO()
     img.save(buffered, format="PNG")
     return buffered.getvalue()
@@ -61,17 +78,15 @@ def upload_qr_to_imgbb(qr_image_bytes: bytes) -> str:
     try:
         print("📤 Subiendo QR a ImgBB...")
         
-        # Convertir a base64
         qr_base64 = base64.b64encode(qr_image_bytes).decode()
         
-        # Subir a ImgBB
         response = requests.post(
             "https://api.imgbb.com/1/upload",
             data={
                 "key": IMG_BB_API_KEY,
                 "image": qr_base64,
                 "name": f"qr_reserva_{uuid.uuid4().hex[:8]}",
-                "expiration": 604800  # 7 días en segundos
+                "expiration": 604800
             }
         )
         
@@ -82,7 +97,6 @@ def upload_qr_to_imgbb(qr_image_bytes: bytes) -> str:
             return qr_url
         else:
             print(f"❌ Error subiendo a ImgBB: {response.status_code}")
-            print(f"   Respuesta: {response.text}")
             return None
             
     except Exception as e:
@@ -91,20 +105,16 @@ def upload_qr_to_imgbb(qr_image_bytes: bytes) -> str:
 
 def send_qr_email(to_email: str, datos: dict):
     """
-    Envía email con código QR usando ImgBB con Resend
-    Versión mejorada y bonita como el antiguo código
+    Envía email con código QR usando ImgBB con Brevo
     """
     try:
-        print(f"🎯 [RESEND] Enviando QR email a: {to_email}")
+        print(f"🎯 [BREVO] Enviando QR email a: {to_email}")
         
-        # Generar QR
         qr_data = f"{datos['codigo_qr']}|{datos['token_verificacion']}"
         qr_image_bytes = generate_qr_image(qr_data)
         
-        # Subir a ImgBB
         qr_url = upload_qr_to_imgbb(qr_image_bytes)
         
-        # Si falla ImgBB, usar base64 como fallback
         qr_display = ""
         if qr_url:
             qr_display = f'<img src="{qr_url}" alt="Código QR para {datos["codigo_qr"]}" class="qr-image" />'
@@ -113,10 +123,8 @@ def send_qr_email(to_email: str, datos: dict):
             qr_base64 = base64.b64encode(qr_image_bytes).decode()
             qr_display = f'<img src="data:image/png;base64,{qr_base64}" alt="Código QR" class="qr-image" />'
         
-        # Formatear fecha
         fecha = datos['fecha_reserva']
         
-        # HTML con diseño mejorado
         html_content = f"""
         <!DOCTYPE html>
         <html>
@@ -296,7 +304,6 @@ def send_qr_email(to_email: str, datos: dict):
                         <h3>📱 Tu Código QR Personal</h3>
                         <p>Presenta este código QR al personal de control de acceso:</p>
                         
-                        <!-- Imagen QR -->
                         {qr_display}
                         
                         <div class="qr-code-text">
@@ -352,7 +359,6 @@ def send_qr_email(to_email: str, datos: dict):
         </html>
         """
         
-        # Texto plano (fallback)
         text_content = f"""
         Tu código QR para la reserva en {datos['nombre_cancha']}
         
@@ -385,7 +391,6 @@ def send_qr_email(to_email: str, datos: dict):
         ID de reserva: {datos['codigo_reserva']}
         """
         
-        # Enviar con Resend
         return send_email(
             to_email=to_email,
             subject=f"🎟️ Tu código QR para la reserva en {datos['nombre_cancha']} | {datos['codigo_reserva']}",
@@ -394,11 +399,10 @@ def send_qr_email(to_email: str, datos: dict):
         )
         
     except Exception as e:
-        print(f"❌ [RESEND] Error enviando QR email: {e}")
+        print(f"❌ [BREVO] Error enviando QR email: {e}")
         import traceback
         traceback.print_exc()
         
-        # Envío simple como fallback
         try:
             simple_subject = f"Tu código QR para la reserva en {datos['nombre_cancha']}"
             simple_message = f"""
@@ -423,15 +427,9 @@ def send_qr_email(to_email: str, datos: dict):
             print(f"❌ Falló el envío simple: {e2}")
             return False
 
-# Función principal para envío de QR (usa la nueva versión con Resend)
 def send_qr_email_with_attachment(to_email: str, datos: dict):
-    """
-    Función wrapper para mantener compatibilidad
-    Ahora usa Resend en lugar de SMTP con attachment
-    """
     return send_qr_email(to_email, datos)
 
-# Funciones auxiliares con diseño mejorado
 def send_welcome_email(to_email: str, nombre: str, apellido: str):
     html_content = f"""
     <!DOCTYPE html>
