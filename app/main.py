@@ -9,8 +9,6 @@ from app.routers import (
     incidentes, comentarios
 )
 
-# Crear tablas
-Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
     title="Sistema de Reservas Deportivas - OlympiaHub",
