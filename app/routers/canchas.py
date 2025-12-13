@@ -22,6 +22,16 @@ router = APIRouter()
 # Eliminamos todas las funciones locales de manejo de archivos
 # Y usamos el servicio de Supabase Storage
 
+@router.get("/public/all", response_model=list[CanchaResponse])
+def get_todas_canchas_public(db: Session = Depends(get_db)):
+    """
+    Ruta nueva: Obtiene TODAS las canchas sin importar su estado 
+    (activa, disponible, mantenimiento, etc.) para la vista de visitantes.
+    """
+    return db.query(Cancha).all()
+
+
+
 @router.get("/{cancha_id}/disponibilidad", response_model=DisponibilidadResponse)
 def get_disponibilidad_cancha(
     cancha_id: int,

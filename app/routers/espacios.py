@@ -14,6 +14,14 @@ from datetime import datetime
 
 router = APIRouter()
 
+
+
+@router.get("/public/list", response_model=list[EspacioDeportivoResponse]) # Asegúrate de importar el esquema correcto
+def get_espacios_public(db: Session = Depends(get_db)):
+    """Obtener espacios deportivos para uso público (sin login)"""
+    return db.query(EspacioDeportivo).all()
+
+
 @router.get("/", response_model=list[EspacioDeportivoResponse])
 def get_espacios(
     include_inactive: bool = False, 
