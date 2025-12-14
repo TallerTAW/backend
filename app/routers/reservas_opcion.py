@@ -18,14 +18,15 @@ from app.schemas.reserva import ReservaResponse, ReservaCreate, ReservaUpdate
 from app.models.administra import Administra
 from app.models.asistente import AsistenteReserva
 from app.schemas.asistente import AsistenteCreate
-from app.core.email_service import send_qr_email
+from app.core.email_service import send_qr_email, send_email
 import random
 import string
 from sqlalchemy import text
 import uuid
 import secrets
-from app.core.security import get_current_user
+from app.core.security import get_current_user, get_current_user_optional
 from app.core.security import get_password_hash
+
 
 
 router = APIRouter()
@@ -518,13 +519,12 @@ def crear_reserva_con_asistentes(
             detail=f"Error al crear reserva: {str(e)}"
         )
 
-def enviar_email_con_qr_asincrono(asistente: AsistenteReserva, reserva: Reserva, cancha_nombre:str, usuario: Usuario):
+def enviar_email_con_qr_asincrono(asistente: AsistenteReserva, reserva: Reserva, cancha_nombre: str, usuario: Usuario):
     """
     Función asíncrona para enviar email con QR
     """
     try:
-        # Importar aquí para evitar problemas de importación circular
-        from app.core.email_service import send_qr_email_with_attachment  # O send_qr_email
+        from app.core.email_service import send_qr_email_with_attachment
         
         # Datos para el email
         datos_email = {
@@ -540,17 +540,11 @@ def enviar_email_con_qr_asincrono(asistente: AsistenteReserva, reserva: Reserva,
             "token_verificacion": asistente.token_verificacion
         }
         
-        # Prueba con attachment primero (más confiable)
+        # Enviar email
         enviado = send_qr_email_with_attachment(
             to_email=asistente.email,
             datos=datos_email
         )
-        
-        # Si falla, intenta con la versión normal
-        if not enviado:
-            print(f"⚠️ Attachment falló, intentando método normal...")
-            from app.core.email_service import send_qr_email
-            enviado = send_qr_email(asistente.email, datos_email)
         
         if enviado:
             print(f"✅ [EMAIL] QR enviado a {asistente.email}")
@@ -1058,7 +1052,7 @@ def crear_reserva_con_codigo_unico(
     db: Session = Depends(get_db)
 ):
     """
-    CREAR RESERVA CON CÓDIGO ÚNICO - Con QR para usuario principal
+    CREAR RESERVA CON CÓDIGO ÚNICO - Con QR solo para usuario principal
     """
     print(f"[BACKEND] Creando reserva con código único - Asistentes: {reserva_data.cantidad_asistentes}")
     
@@ -1169,14 +1163,11 @@ def crear_reserva_con_codigo_unico(
             except Exception as cupon_error:
                 print(f"[BACKEND] Error aplicando cupón: {str(cupon_error)}")
         
-        # ✅ CREAR ASISTENTE PARA EL USUARIO PRINCIPAL (con su propio QR)
-        from app.core.email_service import generar_codigo_qr, generar_token_verificacion
-        
-        # Generar QR único para el usuario principal
+        # ✅ CREAR ASISTENTE PARA EL USUARIO PRINCIPAL SOLAMENTE
+        # NO crear placeholders para otros asistentes
         codigo_qr_principal = generar_codigo_qr()
         token_principal = generar_token_verificacion()
         
-        # Crear registro de asistente para el usuario principal
         asistente_principal = AsistenteReserva(
             id_reserva=nueva_reserva.id_reserva,
             nombre=usuario.nombre,
@@ -1184,7 +1175,6 @@ def crear_reserva_con_codigo_unico(
             codigo_qr=codigo_qr_principal,
             token_verificacion=token_principal,
             asistio=False,
-            id_usuario=usuario.id_usuario
         )
         
         db.add(asistente_principal)
@@ -1192,6 +1182,7 @@ def crear_reserva_con_codigo_unico(
         db.refresh(asistente_principal)
         
         print(f"[BACKEND] Asistente principal creado con QR: {codigo_qr_principal}")
+        print(f"[BACKEND] Cupos disponibles para invitados: {reserva_data.cantidad_asistentes - 1}")
         
         # ✅ ENVIAR EMAIL CON QR AL USUARIO PRINCIPAL
         background_tasks.add_task(
@@ -1203,7 +1194,7 @@ def crear_reserva_con_codigo_unico(
         )
         
         # ✅ ENVIAR EMAIL ADICIONAL CON CÓDIGO PARA INVITADOS
-        cantidad_invitados = reserva_data.cantidad_asistentes - 1
+        cantidad_invitados = reserva_data.cantidad_asistentes  # Restar 1 por el usuario principal
         if cantidad_invitados > 0:
             background_tasks.add_task(
                 enviar_email_codigo_invitados,
@@ -1232,6 +1223,7 @@ def crear_reserva_con_codigo_unico(
         ).filter(Reserva.id_reserva == nueva_reserva.id_reserva).first()
         
         print(f"[BACKEND] Reserva con código único creada exitosamente")
+        print(f"[BACKEND] Detalles: ID={reserva_final.id_reserva}, Código={reserva_final.codigo_reserva}, Asistentes={reserva_data.cantidad_asistentes}, Cupos disponibles={cantidad_invitados}")
         
         return reserva_final
         
@@ -1438,50 +1430,112 @@ def unirse_con_codigo_reserva(
     invitado_data: dict,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    current_user: Usuario = Depends(get_current_user),  # ✅ Usuario autenticado
+    current_user: Optional[Usuario] = Depends(get_current_user_optional),
 ):
     """
     UN INVITADO SE UNE A UNA RESERVA USANDO EL CÓDIGO DE RESERVA
+    - Maneja tanto usuarios autenticados como visitantes
+    - Visitante: debe proporcionar nombre y email
+    - Autenticado: usa datos del perfil
     """
-    print(f"[BACKEND] Uniendo invitado con código: {codigo_reserva}")
+    print(f"[BACKEND] Uniendo a reserva con código: {codigo_reserva}")
+    print(f"[BACKEND] Datos recibidos: {invitado_data}")
+    print(f"[BACKEND] Usuario autenticado: {'Sí' if current_user else 'No'}")
+    if current_user:
+        print(f"[BACKEND] Usuario actual: {current_user.email} (ID: {current_user.id_usuario})")
     
-    # Buscar la reserva por código_reserva
+    # 1. Buscar la reserva por código_reserva
     reserva = db.query(Reserva).filter(Reserva.codigo_reserva == codigo_reserva).first()
     
     if not reserva:
         raise HTTPException(status_code=404, detail="Código de reserva no encontrado")
     
-    # Verificar si aún hay cupo para invitados
-    asistentes_actuales = db.query(AsistenteReserva).filter(
-        AsistenteReserva.id_reserva == reserva.id_reserva
-    ).count()
+    print(f"[BACKEND] Reserva encontrada: ID={reserva.id_reserva}, Total asistentes={reserva.cantidad_asistentes}")
     
-    total_actual = 1 + asistentes_actuales  # 1 es el que hizo la reserva
+    # 2. Verificar si la reserva está activa
+    if reserva.estado not in ["pendiente", "confirmada"]:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Esta reserva no está disponible (estado: {reserva.estado})"
+        )
     
-    if total_actual >= reserva.cantidad_asistentes:
-        raise HTTPException(status_code=400, detail="No hay cupo disponible en esta reserva")
+    # 3. DETERMINAR DATOS DEL INVITADO
+    nombre_invitado = ""
+    email_invitado = ""
     
-    # ✅ Usar datos del usuario logueado si no se proporcionan
-    nombre = invitado_data.get("nombre") or current_user.nombre
-    email = invitado_data.get("email") or current_user.email
+    if current_user:
+        # ✅ USUARIO AUTENTICADO: Usar datos del perfil
+        nombre_invitado = current_user.nombre
+        email_invitado = current_user.email
+        print(f"[BACKEND] Usando datos del usuario autenticado: {nombre_invitado} ({email_invitado})")
+    else:
+        # ✅ VISITANTE: Usar datos del formulario
+        if not invitado_data.get("nombre") or not invitado_data.get("email"):
+            raise HTTPException(
+                status_code=400, 
+                detail="Como visitante, debes proporcionar nombre y email"
+            )
+        
+        nombre_invitado = invitado_data["nombre"]
+        email_invitado = invitado_data["email"]
+        
+        # Validar email del visitante
+        import re
+        email_regex = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        if not re.match(email_regex, email_invitado):
+            raise HTTPException(status_code=400, detail="Email no válido")
+        
+        print(f"[BACKEND] Usando datos del visitante: {nombre_invitado} ({email_invitado})")
     
-    # Verificar si el email ya está registrado en esta reserva
+    # 4. Verificar si este email ya está registrado en esta reserva
     asistente_existente = db.query(AsistenteReserva).filter(
         AsistenteReserva.id_reserva == reserva.id_reserva,
-        AsistenteReserva.email == email
+        AsistenteReserva.email == email_invitado
     ).first()
     
     if asistente_existente:
-        raise HTTPException(status_code=400, detail="Ya estás registrado en esta reserva")
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Ya estás registrado en esta reserva con el email {email_invitado}"
+        )
     
-    # Crear asistente
+    # 5. Contar asistentes actuales (excluyendo placeholders si existen)
+    asistentes_actuales = db.query(AsistenteReserva).filter(
+        AsistenteReserva.id_reserva == reserva.id_reserva,
+        AsistenteReserva.codigo_qr != "PENDIENTE",  # Excluir placeholders si los hay
+        AsistenteReserva.email != "pendiente@ejemplo.com"  # Excluir placeholders
+    ).count()
+    
+    print(f"[BACKEND] Asistentes actuales (reales): {asistentes_actuales}")
+    
+    # 6. Verificar si hay cupo disponible
+    if asistentes_actuales >= reserva.cantidad_asistentes:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"No hay cupo disponible. Ya hay {asistentes_actuales} asistentes de {reserva.cantidad_asistentes} cupos."
+        )
+    
+    cupos_disponibles = reserva.cantidad_asistentes - asistentes_actuales
+    print(f"[BACKEND] Cupo disponible antes de unir: {cupos_disponibles}")
+    
+    # 7. Obtener información de la cancha para el email
+    cancha_info = "Cancha"
+    if reserva.cancha:
+        cancha_info = reserva.cancha.nombre
+    
+    # 8. Obtener información del usuario que hizo la reserva (para el email)
+    usuario_reserva = db.query(Usuario).filter(Usuario.id_usuario == reserva.id_usuario).first()
+    if not usuario_reserva:
+        print(f"[BACKEND] ⚠️ Usuario que hizo la reserva no encontrado")
+    
+    # 9. Crear asistente
     codigo_qr = generar_codigo_qr()
     token_verificacion = generar_token_verificacion()
     
     asistente = AsistenteReserva(
         id_reserva=reserva.id_reserva,
-        nombre=nombre,
-        email=email,
+        nombre=nombre_invitado,
+        email=email_invitado,
         codigo_qr=codigo_qr,
         token_verificacion=token_verificacion,
         asistio=False,
@@ -1491,38 +1545,79 @@ def unirse_con_codigo_reserva(
         db.add(asistente)
         db.commit()
         
-        # Enviar email con QR al invitado
-        background_tasks.add_task(
-            enviar_email_con_qr_asincrono,
-            asistente=asistente,
-            reserva=reserva,
-            cancha_nombre=reserva.cancha.nombre,
-            usuario=reserva.usuario
-        )
+        print(f"[BACKEND] Asistente creado exitosamente: {nombre_invitado} ({email_invitado})")
+        print(f"[BACKEND] QR generado: {codigo_qr}")
         
-        # ✅ ASIGNAR CUPÓN DE 5% AL INVITADO SI ES SU PRIMERA RESERVA
-        reservas_invitado = db.query(Reserva).filter(
-            Reserva.id_usuario == current_user.id_usuario,
-            Reserva.estado != "cancelada"
-        ).count()
+        # 10. Enviar email con QR al invitado
+        if usuario_reserva:
+            background_tasks.add_task(
+                enviar_email_con_qr_asincrono,
+                asistente=asistente,
+                reserva=reserva,
+                cancha_nombre=cancha_info,
+                usuario=usuario_reserva
+            )
+            print(f"[BACKEND] Email con QR programado para enviar")
         
-        if reservas_invitado < 5:
-            cupon_5 = generar_cupon_5_porciento(current_user.id_usuario, db)
-            if cupon_5:
-                print(f"[BACKEND] Cupón 5% asignado al invitado: {current_user.email}")
+        # 11. ASIGNAR CUPÓN DE 5% SI ES USUARIO AUTENTICADO Y ES SU PRIMERA RESERVA
+        if current_user:
+            reservas_como_usuario = db.query(Reserva).filter(
+                Reserva.id_usuario == current_user.id_usuario,
+                Reserva.estado != "cancelada"
+            ).count()
+            
+            if reservas_como_usuario < 5:
+                cupon_5 = generar_cupon_5_porciento(current_user.id_usuario, db)
+                if cupon_5:
+                    print(f"[BACKEND] Cupón 5% asignado al usuario: {cupon_5.codigo}")
         
-        return {
+        # 12. Calcular cupos restantes después de la unión
+        asistentes_despues = asistentes_actuales + 1
+        cupos_restantes = reserva.cantidad_asistentes - asistentes_despues
+        
+        print(f"[BACKEND] Unión exitosa. Cupos restantes después: {cupos_restantes}")
+        
+        # 13. Si es visitante, crear un usuario temporal o sugerir registro
+        if not current_user:
+            # Verificar si el email ya existe como usuario
+            usuario_existente = db.query(Usuario).filter(Usuario.email == email_invitado).first()
+            if not usuario_existente:
+                # Podemos crear un usuario temporal o solo registrar el asistente
+                print(f"[BACKEND] Visitante con email nuevo: {email_invitado}")
+                # Podrías crear aquí un usuario con estado 'visitante' si quieres
+                
+        # 14. Preparar respuesta
+        respuesta = {
             "message": "Te has unido exitosamente a la reserva",
             "email_enviado": True,
             "codigo_qr": codigo_qr,
-            "cupos_restantes": reserva.cantidad_asistentes - (total_actual + 1),
-            "reserva_id": reserva.id_reserva
+            "cupos_restantes": max(0, cupos_restantes),
+            "reserva_id": reserva.id_reserva,
+            "es_visitante": not bool(current_user),  # Indica si es visitante
+            "detalles_reserva": {
+                "cancha": cancha_info,
+                "fecha": reserva.fecha_reserva.strftime("%d/%m/%Y"),
+                "hora_inicio": reserva.hora_inicio.strftime("%H:%M"),
+                "hora_fin": reserva.hora_fin.strftime("%H:%M"),
+                "codigo_reserva": codigo_reserva
+            }
         }
+        
+        # Si es visitante, sugerir crear cuenta
+        if not current_user:
+            respuesta["sugerencia_registro"] = "Te sugerimos crear una cuenta para acceder a más beneficios"
+        
+        return respuesta
         
     except Exception as e:
         db.rollback()
         print(f"[BACKEND] Error uniendo invitado: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error al unirse a la reserva: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Error al unirse a la reserva: {str(e)}"
+        )
     
 @router.post("/registrar-y-unirse/{codigo_reserva}")
 def registrar_y_unirse_reserva(
@@ -1651,7 +1746,6 @@ def registrar_y_unirse_reserva(
 def enviar_email_bienvenida_con_reserva(usuario: Usuario, reserva: Reserva, cancha_nombre: str):
     """Enviar email de bienvenida con información de la reserva"""
     try:
-        from app.core.email_service import send_email
         
         html_content = f"""
         <!DOCTYPE html>
