@@ -4,9 +4,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.database import engine, Base
 from app.config import settings
 from app.routers import (
-    auth, notifications, reservas_opcion, usuarios, espacios, canchas, 
-    disciplinas, cupones, pagos, reportes, control_acceso, content, 
-    incidentes, comentarios
+    auth, 
+    notifications, 
+    reservas_opcion, 
+    usuarios, 
+    espacios, 
+    canchas, 
+    disciplinas, 
+    cupones, 
+    pagos, 
+    reportes, 
+    control_acceso, 
+    content, 
+    incidentes, 
+    comentarios,
+    libelula # <--- ¡Nuevo Router Importado!
 )
 
 
@@ -23,7 +35,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", 
+"OPTIONS"],
     allow_headers=[
         "Authorization",
         "Content-Type",
@@ -46,6 +59,10 @@ app.include_router(cupones.router, prefix="/cupones", tags=["Cupones"])
 app.include_router(disciplinas.router, prefix="/disciplinas", tags=["Disciplinas"])
 app.include_router(reservas_opcion.router, prefix="/reservas", tags=["Reservas Completas"])
 app.include_router(pagos.router, prefix="/pagos", tags=["Pagos"])
+
+# INCLUSIÓN DEL NUEVO ROUTER DE LIBÉLULA (usa el prefix y tags definidos en libelula.py)
+app.include_router(libelula.router) 
+
 app.include_router(reportes.router, prefix="/reportes", tags=["Reportes"])
 app.include_router(control_acceso.router, prefix="/control-acceso", tags=["Control de Acceso"])
 app.include_router(content.router, prefix="/content", tags=["Contenido Dinámico"])

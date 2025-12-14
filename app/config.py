@@ -1,4 +1,5 @@
 # app/config.py
+
 from pydantic_settings import BaseSettings
 from typing import List, Optional
 
@@ -16,16 +17,28 @@ class Settings(BaseSettings):
     
     # Supabase (LEGACY KEYS)
     SUPABASE_URL: str
-    SUPABASE_KEY: str           # anon public key
-    SUPABASE_SERVICE_KEY: str   # service_role key
+    SUPABASE_KEY: str      # anon public key
+    SUPABASE_SERVICE_KEY: str  # service_role key
 
-    #email senders
+    # email senders
     IMG_BB_API_KEY: str
     BREVO_API_KEY: str
     SENDER_EMAIL: str
     
     # CORS
     FRONTEND_URLS: str = "http://localhost:5173,http://localhost:3000,capacitor://localhost,http://localhost"
+
+    # =======================================================
+    # 💳 CONFIGURACIÓN DE LIBÉLULA PAYMENT GATEWAY (NUEVO)
+    # =======================================================
+    LIBELULA_API_URL: str = "https://api.libelula.com" # O la URL de prueba/sandbox
+    LIBELULA_API_KEY: str
+    # URL de tu API a donde Libélula enviará las notificaciones (Webhook)
+    # Debe ser accesible públicamente, por ejemplo: https://tudominio.com/pagos/libelula/webhook/notifications
+    LIBELULA_WEBHOOK_URL: str
+    # URL base de tu frontend para redirecciones de éxito/cancelación
+    FRONTEND_BASE_URL: str 
+    # =======================================================
     
     @property
     def allowed_origins(self) -> List[str]:

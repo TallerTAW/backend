@@ -1,6 +1,5 @@
 # 📍 ARCHIVO: app/routers/reservas_opcion.py
-# 🎯 PROPÓSITO: Endpoint completo de reservas con integración de cupones y todas las funciones
-# 💡 VERSIÓN FUSIONADA: Combina reservas_opcion.py original con reservas.py básico
+# 🎯 PROPÓSITO: Endpoint completo de reservas con integración de cupones y PASARELA LIBÉLULA
 
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.orm import Session, joinedload
@@ -14,11 +13,17 @@ from app.models.cancha import Cancha
 from app.models.usuario import Usuario
 from app.models.disciplina import Disciplina
 from app.models.cupon import Cupon
+# NUEVAS IMPORTACIONES CLAVE para Pago Libélula
+from app.models.pago import Pago 
+from app.core.libelula_service import LibelulaService, get_libelula_service
+from app.schemas.libelula import PaymentInitiation, PaymentInitiationResponse
+from app.core.exceptions import PaymentGatewayError 
+# Fin de NUEVAS IMPORTACIONES
 from app.schemas.reserva import ReservaResponse, ReservaCreate, ReservaUpdate
 from app.models.administra import Administra
 from app.models.asistente import AsistenteReserva
 from app.schemas.asistente import AsistenteCreate
-from app.core.email_service import send_qr_email
+from app.core.email_service import send_qr_email, send_email # Asegúrate de que send_email esté disponible
 import random
 import string
 from sqlalchemy import text
@@ -26,7 +31,7 @@ import uuid
 import secrets
 from app.core.security import get_current_user
 from app.core.security import get_password_hash
-
+import traceback
 
 router = APIRouter()
 
@@ -560,45 +565,45 @@ def enviar_email_con_qr_asincrono(asistente: AsistenteReserva, reserva: Reserva,
     except Exception as e:
         print(f"❌ [EMAIL] Error en envío de email: {str(e)}")
 
-@router.post("/", response_model=ReservaResponse)
-def create_reserva(reserva_data: ReservaCreate, db: Session = Depends(get_db)):
+@router.post(
+    "/", 
+    response_model=PaymentInitiationResponse, # Ahora retorna la URL de pago de Libélula
+    status_code=status.HTTP_201_CREATED,
+    summary="Crea una nueva reserva e inicia el flujo de pago con Libélula"
+)
+async def create_reserva(
+    reserva_data: ReservaCreate,
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user),
+    libelula_service: LibelulaService = Depends(get_libelula_service) # Inyección del servicio de pagos
+):
     """
-    🎯 CREAR RESERVA CON SOPORTE PARA CUPONES - VERSIÓN CORREGIDA
-    💡 CAMBIO PRINCIPAL: Integración completa del sistema de cupones durante la creación
-    💡 CORRECCIÓN CRÍTICA: Conversión de decimal.Decimal a float en cálculo de descuentos
+    Crea la reserva, aplica cupones, crea el registro de pago y genera la URL de Libélula.
     """
     print(f"🎯 [BACKEND] Iniciando creación de reserva: {reserva_data.dict()}")
-
-    # ✅ VALIDACIÓN: Solo horas completas (minutos en 00)
-    if reserva_data.hora_inicio.minute != 0 or reserva_data.hora_fin.minute != 0:
-        raise HTTPException(
-            status_code=400, 
-            detail="Las reservas solo pueden hacerse en horas completas (ej: 10:00, 11:00). Por favor, seleccione una hora en punto."
-        )
     
-    # Verificar que la cancha existe
-    cancha = db.query(Cancha).filter(Cancha.id_cancha == reserva_data.id_cancha).first()
-    if not cancha:
-        raise HTTPException(status_code=404, detail="Cancha no encontrada")
+    # Asegurar que el ID de usuario del token se use para la reserva
+    if current_user.id_usuario != reserva_data.id_usuario:
+         reserva_data.id_usuario = current_user.id_usuario
     
-    # ✅ VALIDACIÓN ADICIONAL: Cancha debe estar activa
-    if cancha.estado != 'disponible':
-        raise HTTPException(status_code=400, detail="La cancha no está disponible para reservas")
-    
-    # Verificar que la disciplina existe
-    disciplina = db.query(Disciplina).filter(Disciplina.id_disciplina == reserva_data.id_disciplina).first()
-    if not disciplina:
-        raise HTTPException(status_code=404, detail="Disciplina no encontrada")
-    
-    # Verificar que el usuario existe
-    usuario = db.query(Usuario).filter(Usuario.id_usuario == reserva_data.id_usuario).first()
-    if not usuario:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    
-    # VERIFICAR DISPONIBILIDAD USANDO FUNCIÓN POSTGRESQL
+    # ----------------------------------------------------
+    # INICIO DE BLOQUE TRANSACCIONAL
+    # ----------------------------------------------------
     try:
-        print(f"🔍 [BACKEND] Verificando disponibilidad para cancha {reserva_data.id_cancha}, fecha {reserva_data.fecha_reserva}, horario {reserva_data.hora_inicio}-{reserva_data.hora_fin}")
+        # ✅ VALIDACIÓN: Horas completas
+        if reserva_data.hora_inicio.minute != 0 or reserva_data.hora_fin.minute != 0:
+            raise HTTPException(status_code=400, detail="Las reservas solo pueden hacerse en horas completas.")
         
+        # Verificar cancha y disciplina
+        cancha = db.query(Cancha).filter(Cancha.id_cancha == reserva_data.id_cancha).first()
+        if not cancha or cancha.estado != 'disponible':
+            raise HTTPException(status_code=404, detail="Cancha no disponible o no encontrada")
+        
+        disciplina = db.query(Disciplina).filter(Disciplina.id_disciplina == reserva_data.id_disciplina).first()
+        if not disciplina:
+            raise HTTPException(status_code=404, detail="Disciplina no encontrada")
+        
+        # VERIFICAR DISPONIBILIDAD USANDO FUNCIÓN POSTGRESQL (Tu lógica de DB)
         result = db.execute(
             text("SELECT verificar_disponibilidad(:cancha_id, :fecha, :hora_inicio, :hora_fin) as disponible"),
             {
@@ -608,158 +613,130 @@ def create_reserva(reserva_data: ReservaCreate, db: Session = Depends(get_db)):
                 "hora_fin": reserva_data.hora_fin
             }
         )
-        disponible = result.scalar()
+        if not result.scalar():
+            raise HTTPException(status_code=400, detail="La cancha no está disponible en el horario solicitado")
         
-        print(f"🔍 [BACKEND] Resultado verificación disponibilidad: {disponible}")
+        # Verificar rangos de horario y fecha pasada
+        if reserva_data.hora_inicio < cancha.hora_apertura or reserva_data.hora_fin > cancha.hora_cierre:
+            raise HTTPException(status_code=400, detail=f"El horario debe estar entre {cancha.hora_apertura} y {cancha.hora_cierre}")
+        if reserva_data.fecha_reserva < date.today():
+            raise HTTPException(status_code=400, detail="No se pueden hacer reservas en fechas pasadas")
         
-        if not disponible:
-            raise HTTPException(
-                status_code=400, 
-                detail="La cancha no está disponible en el horario solicitado"
-            )
-            
-    except Exception as e:
-        print(f"❌ [BACKEND] Error en verificación de disponibilidad: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error al verificar disponibilidad: {str(e)}"
+        # Calcular costo total INICIAL
+        costo_total = calcular_costo_total(
+            reserva_data.hora_inicio, reserva_data.hora_fin, float(cancha.precio_por_hora)
         )
-    
-    # Verificar que el horario esté dentro del rango de la cancha
-    if reserva_data.hora_inicio < cancha.hora_apertura or reserva_data.hora_fin > cancha.hora_cierre:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"El horario debe estar entre {cancha.hora_apertura} y {cancha.hora_cierre}"
+        
+        # Generar código único de reserva
+        codigo_reserva = generar_codigo_unico_reserva(db)
+        
+        # ✅ CREAR LA RESERVA INICIAL EN ESTADO 'pendiente'
+        reserva_dict = reserva_data.dict()
+        codigo_cupon = reserva_dict.pop('codigo_cupon', None)
+        
+        nueva_reserva = Reserva(
+            **reserva_dict,
+            costo_total=costo_total,
+            codigo_reserva=codigo_reserva,
+            estado="pendiente" # Estado inicial a la espera de pago
         )
-    
-    # Verificar que la fecha no sea en el pasado
-    if reserva_data.fecha_reserva < date.today():
-        raise HTTPException(status_code=400, detail="No se pueden hacer reservas en fechas pasadas")
-    
-    # Calcular costo total INICIAL (sin cupón)
-    costo_total = calcular_costo_total(
-        reserva_data.hora_inicio, reserva_data.hora_fin, float(cancha.precio_por_hora)
-    )
-    
-    costo_inicial = costo_total  # Guardar para referencia
-    
-    # ✅ CORRECCIÓN IMPORTANTE: Generar código único de reserva CON VALIDACIÓN MEJORADA
-    codigo_reserva = generar_codigo_unico_reserva(db)
-    
-    # ✅ VALIDACIÓN EXTRA: Asegurar que el código no sea None
-    if not codigo_reserva:
-        codigo_reserva = f"RES-{int(datetime.now().timestamp())}"
-    
-    print(f"✅ [BACKEND] Generado código reserva: {codigo_reserva}")
-    print(f"💰 [BACKEND] Costo inicial calculado: ${costo_total}")
-    
-    # ✅ EXCLUIR CAMPO DE CUPÓN AL CREAR LA RESERVA INICIAL
-    reserva_dict = reserva_data.dict()
-    codigo_cupon = reserva_dict.pop('codigo_cupon', None)  # Extraer y remover código de cupón
-    
-    # Crear la reserva con costo inicial
-    nueva_reserva = Reserva(
-        **reserva_dict,
-        costo_total=costo_total,
-        codigo_reserva=codigo_reserva,
-        estado="pendiente"
-    )
-    
-    try:
         db.add(nueva_reserva)
-        db.commit()
-        db.refresh(nueva_reserva)
+        db.flush() # Obtener id_reserva antes de commitear
         
-        # ✅ VERIFICACIÓN FINAL
-        if not nueva_reserva.codigo_reserva:
-            raise Exception("Error crítico: Reserva creada sin código")
-            
-        print(f"✅ [BACKEND] Reserva {nueva_reserva.id_reserva} creada exitosamente con código: {nueva_reserva.codigo_reserva}")
-        
-        # ✅ APLICAR CUPÓN SI SE PROPORCIONA - CORRECCIÓN PRINCIPAL
-        cupon_aplicado = False
-        descuento_aplicado = 0.0
-        
+        # ✅ APLICAR CUPÓN SI SE PROPORCIONA
         if codigo_cupon:
             try:
-                print(f"🎫 [BACKEND] Intentando aplicar cupón: {codigo_cupon}")
-                
-                # Buscar el cupón
                 cupon = db.query(Cupon).filter(Cupon.codigo == codigo_cupon).first()
-                if not cupon:
-                    print(f"❌ [BACKEND] Cupón no encontrado: {codigo_cupon}")
-                    # No lanzar excepción, la reserva se crea sin cupón
-                else:
-                    print(f"✅ [BACKEND] Cupón encontrado: {cupon.codigo} - Tipo: {cupon.tipo} - Monto: {cupon.monto_descuento}")
+                if cupon and cupon.estado == "activo" and \
+                   (not cupon.fecha_expiracion or cupon.fecha_expiracion >= date.today()) and \
+                   (not cupon.id_reserva) and \
+                   (not cupon.id_usuario or cupon.id_usuario == reserva_data.id_usuario):
                     
-                    # Validaciones del cupón
-                    if cupon.estado != "activo":
-                        print(f"❌ [BACKEND] Cupón no está activo: {cupon.estado}")
-                    elif cupon.fecha_expiracion and cupon.fecha_expiracion < date.today():
-                        print(f"❌ [BACKEND] Cupón expirado: {cupon.fecha_expiracion}")
-                    elif cupon.id_reserva:
-                        print(f"❌ [BACKEND] Cupón ya utilizado en reserva: {cupon.id_reserva}")
-                    elif cupon.id_usuario and cupon.id_usuario != reserva_data.id_usuario:
-                        print(f"❌ [BACKEND] Cupón no válido para este usuario. Cupón usuario: {cupon.id_usuario}, Reserva usuario: {reserva_data.id_usuario}")
+                    descuento = 0.0
+                    monto_descuento_float = float(cupon.monto_descuento)
+                    
+                    if cupon.tipo == "porcentaje":
+                        descuento = (costo_total * monto_descuento_float) / 100
                     else:
-                        # ✅ APLICAR DESCUENTO - LÓGICA CORREGIDA (CONVERSIÓN A FLOAT)
-                        if cupon.tipo == "porcentaje":
-                            # ✅ CORRECCIÓN CRÍTICA: Convertir decimal.Decimal a float
-                            descuento = (costo_total * float(cupon.monto_descuento)) / 100
-                            print(f"🎫 [BACKEND] Descuento porcentual: {cupon.monto_descuento}% = ${descuento}")
-                        else:  # fijo
-                            # ✅ CORRECCIÓN CRÍTICA: Convertir decimal.Decimal a float
-                            descuento = float(cupon.monto_descuento)
-                            print(f"🎫 [BACKEND] Descuento fijo: ${descuento}")
-                        
-                        # Asegurar que el descuento no sea mayor al costo total
-                        if descuento > costo_total:
-                            descuento = costo_total
-                            print(f"⚠️ [BACKEND] Descuento ajustado a costo total: ${descuento}")
-                        
-                        nuevo_costo = costo_total - descuento
-                        
-                        # Actualizar reserva y cupón
-                        nueva_reserva.costo_total = nuevo_costo
-                        cupon.id_reserva = nueva_reserva.id_reserva
-                        cupon.estado = "utilizado"
-                        
-                        db.commit()
-                        db.refresh(nueva_reserva)
-                        
-                        cupon_aplicado = True
-                        descuento_aplicado = float(descuento)
-                        
-                        print(f"✅ [BACKEND] Cupón aplicado exitosamente: ${descuento_aplicado} de descuento")
-                        print(f"💰 [BACKEND] Costo actualizado: ${nuevo_costo} (antes: ${costo_inicial})")
-                        
+                        descuento = monto_descuento_float
+                    
+                    if descuento > costo_total:
+                        descuento = costo_total
+                    
+                    nuevo_costo = costo_total - descuento
+                    
+                    # Actualizar reserva y cupón
+                    nueva_reserva.costo_total = nuevo_costo
+                    cupon.id_reserva = nueva_reserva.id_reserva
+                    cupon.estado = "utilizado"
+                    
+                    costo_total = nuevo_costo # Actualizar el costo total para el pago
+                else:
+                    print(f"❌ [BACKEND] Cupón no válido o ya utilizado: {codigo_cupon}. Se continúa con el costo inicial.")
             except Exception as cupon_error:
                 print(f"⚠️ [BACKEND] Error aplicando cupón: {str(cupon_error)}")
-                import traceback
                 traceback.print_exc()
-                # No revertir la reserva por error en cupón, la reserva se mantiene con costo original
         
-        # ✅ CONFIRMAR QUE LA RESERVA SE GUARDÓ CORRECTAMENTE
-        reserva_verificada = db.query(Reserva).filter(Reserva.id_reserva == nueva_reserva.id_reserva).first()
-        print(f"🔍 [BACKEND] Reserva verificada en BD: ID {reserva_verificada.id_reserva}, Estado: {reserva_verificada.estado}, Código: {reserva_verificada.codigo_reserva}, Costo Final: ${reserva_verificada.costo_total}")
-        
-        # Recargar con relaciones para la respuesta
-        reserva_con_relaciones = db.query(Reserva).options(
-            joinedload(Reserva.usuario),
-            joinedload(Reserva.cancha).joinedload(Cancha.espacio_deportivo),
-            joinedload(Reserva.disciplina)
-        ).filter(Reserva.id_reserva == nueva_reserva.id_reserva).first()
-        
-        return reserva_con_relaciones
-        
-    except Exception as e:
-        db.rollback()
-        print(f"❌ [BACKEND] Error al crear reserva: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error al crear reserva: {str(e)}"
+        # ✅ CREAR REGISTRO DE PAGO EN ESTADO PENDIENTE
+        db_pago = Pago(
+            monto=costo_total, # Monto final después del cupón
+            metodo_pago="Libelula",
+            estado="pendiente", 
+            id_reserva=nueva_reserva.id_reserva 
         )
+        db.add(db_pago)
+        db.flush() 
 
+        # --- INICIAR TRANSACCIÓN CON LIBÉLULA ---
+        if costo_total > 0:
+            initiation_data = PaymentInitiation(
+                reserva_id=nueva_reserva.id_reserva, 
+                amount=costo_total,
+                currency="GTQ" 
+            )
+            
+            libelula_response = libelula_service.create_transaction(initiation_data)
+            
+            # Guardamos el ID de transacción generado por Libélula
+            db_pago.id_transaccion = libelula_response.transaction_id
+            print(f"✅ [BACKEND] Transacción Libélula iniciada. ID: {libelula_response.transaction_id}")
+        else:
+            # Si el costo es 0 (ej. 100% de descuento con cupón), se marca como pagado localmente
+            libelula_response = PaymentInitiationResponse(
+                transaction_id="CUPON_0",
+                payment_url="/payment/success", # Redirección directa al frontend
+                status="COMPLETED"
+            )
+            db_pago.id_transaccion = libelula_response.transaction_id
+            db_pago.estado = "pagado" # O "COMPLETED"
+            nueva_reserva.estado = "confirmada" 
+            print("✅ [BACKEND] Costo cero. Pago completado automáticamente.")
+
+        # ✅ COMMIT FINAL (Si todo lo anterior fue exitoso)
+        db.commit()
+        db.refresh(nueva_reserva)
+        db.refresh(db_pago)
+        
+        # Retornamos la respuesta de Libélula (contiene payment_url)
+        return libelula_response
+        
+    except PaymentGatewayError as e:
+        # Si falla Libélula, revertimos la Reserva y el Pago local
+        db.rollback()
+        print(f"❌ [BACKEND] Rollback por error de pasarela: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Error al iniciar el pago con Libélula: {e}"
+        )
+    except Exception as e:
+        # Revertir por cualquier otro error inesperado
+        db.rollback()
+        print(f"❌ [BACKEND] Rollback por error interno: {e}")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error interno al crear reserva: {e}"
+        )
 # ========== ENDPOINTS ESPECIALES PARA DISPONIBILIDAD ==========
 
 @router.get("/cancha/{cancha_id}/horarios-disponibles")
