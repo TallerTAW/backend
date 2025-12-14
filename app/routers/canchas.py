@@ -138,6 +138,37 @@ def get_canchas_por_espacio_y_disciplina_public(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al obtener canchas: {str(e)}"
         )
+    # 📍 ARCHIVO: app/routers/canchas.py
+# AGREGAR ESTE NUEVO ENDPOINT después de get_canchas_por_espacio_y_disciplina_public:
+
+@router.get("/public/disciplina/{disciplina_id}", response_model=list[CanchaResponse])
+def get_canchas_por_disciplina_public(
+    disciplina_id: int,
+    db: Session = Depends(get_db)
+):
+    """Obtener todas las canchas disponibles para una disciplina específica - PÚBLICO"""
+    try:
+        # Obtener canchas que tienen esta disciplina
+        canchas = db.query(Cancha).join(
+            CanchaDisciplina, 
+            Cancha.id_cancha == CanchaDisciplina.id_cancha
+        ).options(
+            joinedload(Cancha.espacio_deportivo)
+        ).filter(
+            CanchaDisciplina.id_disciplina == disciplina_id,
+            Cancha.estado == "disponible"
+        ).all()
+        
+        return canchas
+        
+    except Exception as e:
+        print(f"Error al obtener canchas por disciplina: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al obtener canchas: {str(e)}"
+        )
 
 def obtener_canchas_por_rol(current_user: Usuario, db: Session):
     """Obtener canchas según el rol del usuario"""
