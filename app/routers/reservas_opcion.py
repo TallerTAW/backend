@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_, or_
 from datetime import datetime, date, time
+from datetime import timedelta
 from typing import List, Optional
 from app.database import get_db
 from app.models.reserva import Reserva
@@ -24,6 +25,7 @@ from sqlalchemy import text
 import uuid
 import secrets
 from app.core.security import get_current_user
+from app.core.security import get_password_hash
 
 
 router = APIRouter()
@@ -1007,3 +1009,749 @@ def confirmar_reserva(reserva_id: int, db: Session = Depends(get_db)):
     db.commit()
     
     return {"detail": "Reserva confirmada exitosamente"}
+
+@router.get("/codigo/{codigo_reserva}", response_model=ReservaResponse)
+def obtener_reserva_por_codigo(codigo_reserva: str, db: Session = Depends(get_db)):
+    """Obtener reserva por código de reserva"""
+    print(f"[BACKEND] Buscando reserva con código: {codigo_reserva}")
+    
+    reserva = db.query(Reserva).filter(Reserva.codigo_reserva == codigo_reserva).first()
+    if not reserva:
+        raise HTTPException(status_code=404, detail="Reserva no encontrada")
+    
+    return reserva
+
+def enviar_email_completo_reserva(usuario: Usuario, reserva: Reserva, cancha_nombre: str, cantidad_invitados: int):
+    """
+    Enviar email completo con código y QR
+    """
+    try:
+        from app.core.email_service import send_reservation_complete_email
+        
+        datos_email = {
+            "nombre_usuario": usuario.nombre,
+            "email_usuario": usuario.email,
+            "nombre_cancha": cancha_nombre,
+            "fecha_reserva": reserva.fecha_reserva.strftime("%d/%m/%Y"),
+            "hora_inicio": reserva.hora_inicio.strftime("%H:%M"),
+            "hora_fin": reserva.hora_fin.strftime("%H:%M"),
+            "codigo_reserva": reserva.codigo_reserva,
+            "cantidad_invitados": cantidad_invitados,
+            "costo_total": float(reserva.costo_total)
+        }
+        
+        enviado = send_reservation_complete_email(usuario.email, datos_email)
+        
+        if enviado:
+            print(f"[EMAIL] Email completo enviado a {usuario.email}")
+        else:
+            print(f"[EMAIL] Error al enviar email completo a {usuario.email}")
+            
+    except Exception as e:
+        print(f"[EMAIL] Error en envío de email completo: {str(e)}")
+
+
+@router.post("/crear-con-codigo-unico", response_model=ReservaResponse)
+def crear_reserva_con_codigo_unico(
+    reserva_data: ReservaCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    """
+    CREAR RESERVA CON CÓDIGO ÚNICO - Con QR para usuario principal
+    """
+    print(f"[BACKEND] Creando reserva con código único - Asistentes: {reserva_data.cantidad_asistentes}")
+    
+    # ✅ VALIDACIÓN: Solo horas completas
+    if reserva_data.hora_inicio.minute != 0 or reserva_data.hora_fin.minute != 0:
+        raise HTTPException(
+            status_code=400, 
+            detail="Las reservas solo pueden hacerse en horas completas"
+        )
+    
+    # Verificar que la cancha existe
+    cancha = db.query(Cancha).filter(Cancha.id_cancha == reserva_data.id_cancha).first()
+    if not cancha:
+        raise HTTPException(status_code=404, detail="Cancha no encontrada")
+    
+    if cancha.estado != 'disponible':
+        raise HTTPException(status_code=400, detail="La cancha no está disponible")
+    
+    cancha_nombre = cancha.nombre
+    print(f"[BACKEND] Cancha: {cancha.nombre}")
+    
+    # Verificar usuario
+    usuario = db.query(Usuario).filter(Usuario.id_usuario == reserva_data.id_usuario).first()
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    
+    # VERIFICAR DISPONIBILIDAD
+    try:
+        result = db.execute(
+            text("SELECT verificar_disponibilidad(:cancha_id, :fecha, :hora_inicio, :hora_fin) as disponible"),
+            {
+                "cancha_id": reserva_data.id_cancha,
+                "fecha": reserva_data.fecha_reserva,
+                "hora_inicio": reserva_data.hora_inicio,
+                "hora_fin": reserva_data.hora_fin
+            }
+        )
+        
+        disponible = result.scalar()
+        
+        if not disponible:
+            raise HTTPException(
+                status_code=400, 
+                detail="La cancha no está disponible en el horario solicitado"
+            )
+            
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al verificar disponibilidad: {str(e)}"
+        )
+    
+    # Calcular costo total
+    costo_total = calcular_costo_total(
+        reserva_data.hora_inicio, reserva_data.hora_fin, float(cancha.precio_por_hora)
+    )
+    
+    # Generar código único de reserva
+    codigo_reserva = generar_codigo_unico_reserva(db)
+    
+    if not codigo_reserva:
+        codigo_reserva = f"RES-{int(datetime.now().timestamp())}"
+    
+    print(f"[BACKEND] Código reserva: {codigo_reserva}")
+    
+    # Extraer código cupón
+    reserva_dict = reserva_data.dict(exclude={'asistentes'})  # Excluir asistentes
+    codigo_cupon = reserva_dict.pop('codigo_cupon', None)
+    
+    # Crear la reserva
+    nueva_reserva = Reserva(
+        **reserva_dict,
+        costo_total=costo_total,
+        codigo_reserva=codigo_reserva,
+        estado="pendiente"
+    )
+    
+    try:
+        db.add(nueva_reserva)
+        db.commit()
+        db.refresh(nueva_reserva)
+        
+        print(f"[BACKEND] Reserva {nueva_reserva.id_reserva} creada")
+        
+        # ✅ APLICAR CUPÓN SI EXISTE
+        if codigo_cupon:
+            try:
+                cupon = db.query(Cupon).filter(Cupon.codigo == codigo_cupon).first()
+                if cupon and cupon.estado == "activo":
+                    if cupon.tipo == "porcentaje":
+                        descuento = (costo_total * float(cupon.monto_descuento)) / 100
+                    else:
+                        descuento = float(cupon.monto_descuento)
+                    
+                    if descuento > costo_total:
+                        descuento = costo_total
+                    
+                    nuevo_costo = costo_total - descuento
+                    nueva_reserva.costo_total = nuevo_costo
+                    cupon.id_reserva = nueva_reserva.id_reserva
+                    cupon.estado = "utilizado"
+                    
+                    db.commit()
+                    db.refresh(nueva_reserva)
+                    
+                    print(f"[BACKEND] Cupón aplicado: ${descuento} de descuento")
+                    
+            except Exception as cupon_error:
+                print(f"[BACKEND] Error aplicando cupón: {str(cupon_error)}")
+        
+        # ✅ CREAR ASISTENTE PARA EL USUARIO PRINCIPAL (con su propio QR)
+        from app.core.email_service import generar_codigo_qr, generar_token_verificacion
+        
+        # Generar QR único para el usuario principal
+        codigo_qr_principal = generar_codigo_qr()
+        token_principal = generar_token_verificacion()
+        
+        # Crear registro de asistente para el usuario principal
+        asistente_principal = AsistenteReserva(
+            id_reserva=nueva_reserva.id_reserva,
+            nombre=usuario.nombre,
+            email=usuario.email,
+            codigo_qr=codigo_qr_principal,
+            token_verificacion=token_principal,
+            asistio=False,
+            id_usuario=usuario.id_usuario
+        )
+        
+        db.add(asistente_principal)
+        db.commit()
+        db.refresh(asistente_principal)
+        
+        print(f"[BACKEND] Asistente principal creado con QR: {codigo_qr_principal}")
+        
+        # ✅ ENVIAR EMAIL CON QR AL USUARIO PRINCIPAL
+        background_tasks.add_task(
+            enviar_email_con_qr_asincrono,
+            asistente=asistente_principal,
+            reserva=nueva_reserva,
+            cancha_nombre=cancha_nombre,
+            usuario=usuario
+        )
+        
+        # ✅ ENVIAR EMAIL ADICIONAL CON CÓDIGO PARA INVITADOS
+        cantidad_invitados = reserva_data.cantidad_asistentes - 1
+        if cantidad_invitados > 0:
+            background_tasks.add_task(
+                enviar_email_codigo_invitados,
+                usuario=usuario,
+                reserva=nueva_reserva,
+                cancha_nombre=cancha_nombre,
+                cantidad_invitados=cantidad_invitados
+            )
+        
+        # ✅ ASIGNAR CUPÓN DE 5% SI TIENE MENOS DE 5 RESERVAS
+        reservas_usuario = db.query(Reserva).filter(
+            Reserva.id_usuario == usuario.id_usuario,
+            Reserva.estado != "cancelada"
+        ).count()
+        
+        if reservas_usuario < 5:
+            cupon_5 = generar_cupon_5_porciento(usuario.id_usuario, db)
+            if cupon_5:
+                print(f"[BACKEND] Cupón 5% asignado al usuario: {cupon_5.codigo}")
+        
+        # Recargar con relaciones
+        reserva_final = db.query(Reserva).options(
+            joinedload(Reserva.usuario),
+            joinedload(Reserva.cancha).joinedload(Cancha.espacio_deportivo),
+            joinedload(Reserva.disciplina)
+        ).filter(Reserva.id_reserva == nueva_reserva.id_reserva).first()
+        
+        print(f"[BACKEND] Reserva con código único creada exitosamente")
+        
+        return reserva_final
+        
+    except Exception as e:
+        db.rollback()
+        print(f"[BACKEND] Error al crear reserva: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error al crear reserva: {str(e)}"
+        )
+    
+def enviar_email_codigo_invitados(usuario: Usuario, reserva: Reserva, cancha_nombre: str, cantidad_invitados: int):
+    """
+    Envía email con código para compartir con invitados
+    """
+    try:
+        from app.core.email_service import send_email
+        
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <style>
+                body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }}
+                .header {{ background: linear-gradient(135deg, #0f9fe1 0%, #9eca3f 100%); color: white; padding: 25px; text-align: center; border-radius: 10px 10px 0 0; }}
+                .content {{ background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; }}
+                .code-section {{ background: white; padding: 20px; border: 3px solid #0f9fe1; border-radius: 8px; text-align: center; margin: 20px 0; }}
+                .code {{ font-family: monospace; font-size: 28px; letter-spacing: 3px; color: #1a237e; font-weight: bold; background: #f0f7ff; padding: 15px; border-radius: 5px; }}
+            </style>
+        </head>
+        <body>
+            <div class="header">
+                <h1>👥 Código para Invitados</h1>
+                <p>Comparte con {cantidad_invitados} personas</p>
+            </div>
+            <div class="content">
+                <p>Hola <strong>{usuario.nombre}</strong>,</p>
+                <p>Tu reserva en <strong>{cancha_nombre}</strong> está lista.</p>
+                
+                <div style="background: #f0f7ff; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid #0f9fe1;">
+                    <p><strong>📍 Cancha:</strong> {cancha_nombre}</p>
+                    <p><strong>📅 Fecha:</strong> {reserva.fecha_reserva.strftime("%d/%m/%Y")}</p>
+                    <p><strong>⏰ Horario:</strong> {reserva.hora_inicio.strftime("%H:%M")} - {reserva.hora_fin.strftime("%H:%M")}</p>
+                    <p><strong>👥 Cupos para invitados:</strong> {cantidad_invitados} personas</p>
+                </div>
+                
+                <div class="code-section">
+                    <h3>🔑 Código para Invitar</h3>
+                    <div class="code">{reserva.codigo_reserva}</div>
+                    <p>Comparte este código exacto con tus {cantidad_invitados} invitados</p>
+                </div>
+                
+                <div style="background: #e8f5e9; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #4caf50;">
+                    <h4>📝 Instrucciones para Invitados:</h4>
+                    <ol style="margin: 10px 0; padding-left: 20px;">
+                        <li><strong>Comparte el código</strong> con cada invitado</li>
+                        <li><strong>Cada persona usa el código UNA VEZ</strong> para unirse</li>
+                        <li><strong>Ellos irán a la página principal</strong> → "Unirse con código"</li>
+                        <li><strong>Cada uno ingresará su nombre y email</strong></li>
+                        <li><strong>Recibirán su propio QR</strong> por email</li>
+                    </ol>
+                </div>
+                
+                <div style="background: #fff3e0; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #ff9800;">
+                    <h4>✅ Ya recibiste:</h4>
+                    <ul style="margin: 10px 0; padding-left: 20px;">
+                        <li>📱 <strong>Tu QR personal</strong> (en email separado)</li>
+                        <li>🔑 <strong>Este código para compartir</strong></li>
+                        <li>📊 <strong>Acceso al dashboard</strong> para gestionar</li>
+                    </ul>
+                </div>
+                
+                <p style="text-align: center; margin-top: 30px; font-size: 16px;">
+                    <strong>¡Disfruta del partido! 🏆</strong>
+                </p>
+                
+                <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #ddd; font-size: 12px; color: #666; text-align: center;">
+                    <p>Código válido hasta: {reserva.fecha_reserva.strftime("%d/%m/%Y")}</p>
+                    <p>Este es un mensaje automático, por favor no respondas.</p>
+                    <p>© {datetime.now().year} OlympiaHub - Sistema de Gestión Deportiva</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        text_content = f"""
+        CÓDIGO PARA INVITADOS
+        
+        Hola {usuario.nombre},
+        
+        Tu reserva en {cancha_nombre} está lista.
+        
+        📅 Fecha: {reserva.fecha_reserva.strftime("%d/%m/%Y")}
+        ⏰ Horario: {reserva.hora_inicio.strftime("%H:%M")} - {reserva.hora_fin.strftime("%H:%M")}
+        👥 Cupos para invitados: {cantidad_invitados} personas
+        
+        🔑 CÓDIGO PARA INVITAR:
+        {reserva.codigo_reserva}
+        
+        Instrucciones para Invitados:
+        1. Comparte el código con cada invitado
+        2. Cada persona usa el código UNA VEZ para unirse
+        3. Ellos irán a la página principal → "Unirse con código"
+        4. Cada uno ingresará su nombre y email
+        5. Recibirán su propio QR por email
+        
+        ✅ Ya recibiste:
+        • Tu QR personal (en email separado)
+        • Este código para compartir
+        • Acceso al dashboard para gestionar
+        
+        ¡Disfruta del partido!
+        
+        ---
+        Código válido hasta: {reserva.fecha_reserva.strftime("%d/%m/%Y")}
+        © {datetime.now().year} OlympiaHub
+        """
+        
+        return send_email(
+            to_email=usuario.email,
+            subject=f"🔑 Código para Invitados | {reserva.codigo_reserva} | {cancha_nombre}",
+            message=text_content,
+            html_content=html_content
+        )
+        
+    except Exception as e:
+        print(f"[EMAIL] Error enviando email código invitados: {str(e)}")
+        return False
+    
+def generar_qr_y_enviar_email_usuario_principal(usuario: Usuario, reserva: Reserva, cancha_nombre: str, cantidad_invitados: int):
+    """
+    Genera QR para el usuario principal y envía email completo
+    """
+    try:
+        from app.core.email_service import generar_codigo_qr, generar_token_verificacion, send_qr_email
+        
+        # Generar QR único para el usuario principal
+        codigo_qr = generar_codigo_qr()
+        token_verificacion = generar_token_verificacion()
+        
+        # Crear datos para el email
+        datos_email = {
+            "nombre_asistente": usuario.nombre,
+            "email_asistente": usuario.email,
+            "nombre_reservante": usuario.nombre,
+            "nombre_cancha": cancha_nombre,
+            "fecha_reserva": reserva.fecha_reserva.strftime("%d/%m/%Y"),
+            "hora_inicio": reserva.hora_inicio.strftime("%H:%M"),
+            "hora_fin": reserva.hora_fin.strftime("%H:%M"),
+            "codigo_reserva": reserva.codigo_reserva,
+            "codigo_qr": codigo_qr,
+            "token_verificacion": token_verificacion,
+            "cantidad_invitados": cantidad_invitados,
+            "costo_total": float(reserva.costo_total)
+        }
+        
+        # Enviar email con QR
+        enviado = send_qr_email(usuario.email, datos_email)
+        
+        if enviado:
+            print(f"[EMAIL] QR principal enviado a {usuario.email}")
+        else:
+            print(f"[EMAIL] Error al enviar QR principal a {usuario.email}")
+            
+        return enviado, codigo_qr, token_verificacion
+        
+    except Exception as e:
+        print(f"[EMAIL] Error generando QR principal: {str(e)}")
+        return False, None, None
+
+def generar_cupon_5_porciento(id_usuario: int, db: Session) -> Optional[Cupon]:
+    """Generar cupón de 5% para usuarios con menos de 5 reservas"""
+    try:
+        # Generar código único
+        letras = string.ascii_uppercase
+        numeros = string.digits
+        codigo = ''.join(random.choices(letras, k=3)) + ''.join(random.choices(numeros, k=3))
+        
+        cupon = Cupon(
+            codigo=f"CUP5-{codigo}",
+            monto_descuento=5.0,
+            tipo="porcentaje",
+            estado="activo",
+            id_usuario=id_usuario,
+            fecha_expiracion=date.today() + timedelta(days=30)
+        )
+        
+        db.add(cupon)
+        db.commit()
+        db.refresh(cupon)
+        
+        return cupon
+    except Exception as e:
+        print(f"Error generando cupón 5%: {str(e)}")
+        return None
+
+@router.post("/unirse-con-codigo/{codigo_reserva}")
+def unirse_con_codigo_reserva(
+    codigo_reserva: str,
+    invitado_data: dict,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user),  # ✅ Usuario autenticado
+):
+    """
+    UN INVITADO SE UNE A UNA RESERVA USANDO EL CÓDIGO DE RESERVA
+    """
+    print(f"[BACKEND] Uniendo invitado con código: {codigo_reserva}")
+    
+    # Buscar la reserva por código_reserva
+    reserva = db.query(Reserva).filter(Reserva.codigo_reserva == codigo_reserva).first()
+    
+    if not reserva:
+        raise HTTPException(status_code=404, detail="Código de reserva no encontrado")
+    
+    # Verificar si aún hay cupo para invitados
+    asistentes_actuales = db.query(AsistenteReserva).filter(
+        AsistenteReserva.id_reserva == reserva.id_reserva
+    ).count()
+    
+    total_actual = 1 + asistentes_actuales  # 1 es el que hizo la reserva
+    
+    if total_actual >= reserva.cantidad_asistentes:
+        raise HTTPException(status_code=400, detail="No hay cupo disponible en esta reserva")
+    
+    # ✅ Usar datos del usuario logueado si no se proporcionan
+    nombre = invitado_data.get("nombre") or current_user.nombre
+    email = invitado_data.get("email") or current_user.email
+    
+    # Verificar si el email ya está registrado en esta reserva
+    asistente_existente = db.query(AsistenteReserva).filter(
+        AsistenteReserva.id_reserva == reserva.id_reserva,
+        AsistenteReserva.email == email
+    ).first()
+    
+    if asistente_existente:
+        raise HTTPException(status_code=400, detail="Ya estás registrado en esta reserva")
+    
+    # Crear asistente
+    codigo_qr = generar_codigo_qr()
+    token_verificacion = generar_token_verificacion()
+    
+    asistente = AsistenteReserva(
+        id_reserva=reserva.id_reserva,
+        nombre=nombre,
+        email=email,
+        codigo_qr=codigo_qr,
+        token_verificacion=token_verificacion,
+        asistio=False,
+    )
+    
+    try:
+        db.add(asistente)
+        db.commit()
+        
+        # Enviar email con QR al invitado
+        background_tasks.add_task(
+            enviar_email_con_qr_asincrono,
+            asistente=asistente,
+            reserva=reserva,
+            cancha_nombre=reserva.cancha.nombre,
+            usuario=reserva.usuario
+        )
+        
+        # ✅ ASIGNAR CUPÓN DE 5% AL INVITADO SI ES SU PRIMERA RESERVA
+        reservas_invitado = db.query(Reserva).filter(
+            Reserva.id_usuario == current_user.id_usuario,
+            Reserva.estado != "cancelada"
+        ).count()
+        
+        if reservas_invitado < 5:
+            cupon_5 = generar_cupon_5_porciento(current_user.id_usuario, db)
+            if cupon_5:
+                print(f"[BACKEND] Cupón 5% asignado al invitado: {current_user.email}")
+        
+        return {
+            "message": "Te has unido exitosamente a la reserva",
+            "email_enviado": True,
+            "codigo_qr": codigo_qr,
+            "cupos_restantes": reserva.cantidad_asistentes - (total_actual + 1),
+            "reserva_id": reserva.id_reserva
+        }
+        
+    except Exception as e:
+        db.rollback()
+        print(f"[BACKEND] Error uniendo invitado: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al unirse a la reserva: {str(e)}")
+    
+@router.post("/registrar-y-unirse/{codigo_reserva}")
+def registrar_y_unirse_reserva(
+    codigo_reserva: str,
+    usuario_data: dict,  # Datos del nuevo usuario
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    """
+    Registrar un nuevo usuario y unirlo automáticamente a una reserva
+    """
+    print(f"[BACKEND] Registrando y uniendo usuario con código: {codigo_reserva}")
+    print(f"[BACKEND] Datos recibidos: {usuario_data}")
+    
+    # 1. Verificar que el código de reserva existe
+    reserva = db.query(Reserva).filter(Reserva.codigo_reserva == codigo_reserva).first()
+    if not reserva:
+        raise HTTPException(status_code=404, detail="Código de reserva no encontrado")
+    
+    # 2. Verificar si hay cupo disponible
+    asistentes_actuales = db.query(AsistenteReserva).filter(
+        AsistenteReserva.id_reserva == reserva.id_reserva
+    ).count()
+    
+    total_actual = 1 + asistentes_actuales  # 1 es el que hizo la reserva
+    
+    if total_actual >= reserva.cantidad_asistentes:
+        raise HTTPException(status_code=400, detail="No hay cupo disponible en esta reserva")
+    
+    # 3. Verificar si el email ya está registrado
+    usuario_existente = db.query(Usuario).filter(Usuario.email == usuario_data["email"]).first()
+    if usuario_existente:
+        raise HTTPException(status_code=400, detail="Este email ya está registrado")
+    
+    # 4. Verificar si el email ya está en la reserva
+    asistente_existente = db.query(AsistenteReserva).filter(
+        AsistenteReserva.id_reserva == reserva.id_reserva,
+        AsistenteReserva.email == usuario_data["email"]
+    ).first()
+    
+    if asistente_existente:
+        raise HTTPException(status_code=400, detail="Ya estás registrado en esta reserva")
+    
+    try:
+        # ✅ CORRECCIÓN: Hashear la contraseña
+        
+        hashed_password = get_password_hash(usuario_data.get("contrasenia", ""))
+        
+        # 5. Crear el usuario (activado automáticamente)
+        nuevo_usuario = Usuario(
+            nombre=usuario_data["nombre"],
+            apellido=usuario_data.get("apellido", ""),
+            email=usuario_data["email"],
+            contrasenia=hashed_password,  # ✅ CONTRASEÑA HASHEADA
+            telefono=usuario_data.get("telefono"),
+            estado="activo",  # Activado automáticamente por tener código
+            rol="cliente"
+        )
+        
+        db.add(nuevo_usuario)
+        db.commit()
+        db.refresh(nuevo_usuario)
+        
+        print(f"[BACKEND] Usuario {nuevo_usuario.id_usuario} creado y activado")
+        print(f"[BACKEND] Estado del usuario: {nuevo_usuario.estado}")
+        
+        # 6. Unir al usuario a la reserva
+        codigo_qr = generar_codigo_qr()
+        token_verificacion = generar_token_verificacion()
+        
+        asistente = AsistenteReserva(
+            id_reserva=reserva.id_reserva,
+            nombre=usuario_data["nombre"],
+            email=usuario_data["email"],
+            codigo_qr=codigo_qr,
+            token_verificacion=token_verificacion,
+            asistio=False
+        )
+        
+        db.add(asistente)
+        db.commit()
+        
+        print(f"[BACKEND] Usuario unido a reserva como asistente. QR: {codigo_qr}")
+        
+        # 7. Enviar emails
+        # Email de bienvenida
+        background_tasks.add_task(
+            enviar_email_bienvenida_con_reserva,
+            usuario=nuevo_usuario,
+            reserva=reserva,
+            cancha_nombre=reserva.cancha.nombre if reserva.cancha else "Cancha"
+        )
+        
+        # Email con QR
+        background_tasks.add_task(
+            enviar_email_con_qr_asincrono,
+            asistente=asistente,
+            reserva=reserva,
+            cancha_nombre=reserva.cancha.nombre if reserva.cancha else "Cancha",
+            usuario=reserva.usuario
+        )
+        
+        # 8. Asignar cupón de 5%
+        cupon_5 = generar_cupon_5_porciento(nuevo_usuario.id_usuario, db)
+        if cupon_5:
+            print(f"[BACKEND] Cupón 5% asignado al nuevo usuario: {cupon_5.codigo}")
+        
+        return {
+            "message": "Usuario registrado y unido exitosamente a la reserva",
+            "usuario_id": nuevo_usuario.id_usuario,
+            "reserva_id": reserva.id_reserva,
+            "email_enviado": True,
+            "codigo_qr": codigo_qr,
+            "cupos_restantes": reserva.cantidad_asistentes - (total_actual + 1),
+            "unido_a_reserva": True,  # ✅ IMPORTANTE: Indicar que sí se unió
+            "estado": "activo"  # ✅ Confirmar estado activo
+        }
+        
+    except Exception as e:
+        db.rollback()
+        print(f"[BACKEND] Error registrando y uniendo usuario: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error al registrar y unir: {str(e)}")
+
+def enviar_email_bienvenida_con_reserva(usuario: Usuario, reserva: Reserva, cancha_nombre: str):
+    """Enviar email de bienvenida con información de la reserva"""
+    try:
+        from app.core.email_service import send_email
+        
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <style>
+                body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }}
+                .header {{ background: linear-gradient(135deg, #0f9fe1 0%, #9eca3f 100%); color: white; padding: 25px; text-align: center; border-radius: 10px 10px 0 0; }}
+                .content {{ background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; }}
+                .badge {{ display: inline-block; background: #4caf50; color: white; padding: 5px 15px; border-radius: 20px; font-size: 14px; }}
+                .reserva-card {{ background: #e8f5e9; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 5px solid #4caf50; }}
+            </style>
+        </head>
+        <body>
+            <div class="header">
+                <h1>🎉 ¡Bienvenido a OlympiaHub!</h1>
+                <p>Tu cuenta ha sido activada automáticamente</p>
+            </div>
+            <div class="content">
+                <p>Hola <strong>{usuario.nombre} {usuario.apellido}</strong>,</p>
+                
+                <p>Tu registro en <strong>OlympiaHub</strong> fue exitoso y tu cuenta ha sido <span class="badge">ACTIVADA AUTOMÁTICAMENTE</span> porque te uniste a una reserva.</p>
+                
+                <div class="reserva-card">
+                    <h3 style="color: #2e7d32; margin-top: 0;">📋 Información de tu Reserva</h3>
+                    <p><strong>Cancha:</strong> {cancha_nombre}</p>
+                    <p><strong>Fecha:</strong> {reserva.fecha_reserva.strftime("%d/%m/%Y")}</p>
+                    <p><strong>Horario:</strong> {reserva.hora_inicio.strftime("%H:%M")} - {reserva.hora_fin.strftime("%H:%M")}</p>
+                    <p><strong>Código de Reserva:</strong> {reserva.codigo_reserva}</p>
+                </div>
+                
+                <p><strong>📧 Revisa tu bandeja de entrada:</strong></p>
+                <ul>
+                    <li>Recibirás un email separado con tu <strong>código QR personal</strong></li>
+                    <li>Presenta ese QR al personal de control de acceso</li>
+                    <li>El QR es válido solo para esta reserva</li>
+                </ul>
+                
+                <p><strong>🚀 Acceso Inmediato:</strong></p>
+                <ul>
+                    <li>Puedes iniciar sesión ahora mismo</li>
+                    <li>Tienes acceso completo al sistema</li>
+                    <li>Puedes ver todas tus reservas en el dashboard</li>
+                </ul>
+                
+                <p style="text-align: center; margin-top: 30px;">
+                    <a href="https://olympiahub.app/login" style="display: inline-block; padding: 12px 30px; background: #0f9fe1; color: white; text-decoration: none; border-radius: 5px; font-weight: bold; font-size: 16px;">
+                        🔑 INICIAR SESIÓN AHORA
+                    </a>
+                </p>
+                
+                <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #ddd; font-size: 12px; color: #666; text-align: center;">
+                    <p>Este es un mensaje automático, por favor no respondas.</p>
+                    <p>© {datetime.now().year} OlympiaHub - Sistema de Gestión Deportiva</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        text_content = f"""
+        ¡BIENVENIDO A OLYMPIAHUB!
+        
+        Hola {usuario.nombre} {usuario.apellido},
+        
+        Tu registro fue exitoso y tu cuenta ha sido ACTIVADA AUTOMÁTICAMENTE porque te uniste a una reserva.
+        
+        📋 INFORMACIÓN DE TU RESERVA:
+        • Cancha: {cancha_nombre}
+        • Fecha: {reserva.fecha_reserva.strftime("%d/%m/%Y")}
+        • Horario: {reserva.hora_inicio.strftime("%H:%M")} - {reserva.hora_fin.strftime("%H:%M")}
+        • Código de Reserva: {reserva.codigo_reserva}
+        
+        📧 REVISA TU BANDEJA DE ENTRADA:
+        • Recibirás un email separado con tu código QR personal
+        • Presenta ese QR al personal de control de acceso
+        • El QR es válido solo para esta reserva
+        
+        🚀 ACCESO INMEDIATO:
+        • Puedes iniciar sesión ahora mismo: https://olympiahub.app/login
+        • Tienes acceso completo al sistema
+        • Puedes ver todas tus reservas en el dashboard
+        
+        ---
+        Este es un mensaje automático.
+        © {datetime.now().year} OlympiaHub
+        """
+        
+        return send_email(
+            to_email=usuario.email,
+            subject=f"🎉 ¡Bienvenido a OlympiaHub - Cuenta Activada! | Reserva: {reserva.codigo_reserva}",
+            message=text_content,
+            html_content=html_content
+        )
+        
+    except Exception as e:
+        print(f"[EMAIL] Error enviando email de bienvenida: {str(e)}")
+        return False
+
+@router.get("/test/{codigo}")
+def test_endpoint(codigo: str):
+    return {"codigo_recibido": codigo}

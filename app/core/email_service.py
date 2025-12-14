@@ -624,3 +624,133 @@ def send_approval_email(to_email: str, nombre: str, apellido: str, rol: str):
         message=text_content,
         html_content=html_content
     )
+
+def send_reservation_complete_email(to_email: str, datos: dict):
+    """
+    Envía email completo con código de reserva y QR para el usuario principal
+    """
+    try:
+        print(f"📧 [EMAIL] Enviando email completo a: {to_email}")
+        
+        # Generar QR para el usuario principal
+        qr_data = f"RES-{datos['codigo_reserva']}|{uuid.uuid4().hex[:8]}"
+        qr_image_bytes = generate_qr_image(qr_data)
+        qr_url = upload_qr_to_imgbb(qr_image_bytes)
+        
+        qr_display = ""
+        if qr_url:
+            qr_display = f'<img src="{qr_url}" alt="Código QR para {datos["codigo_reserva"]}" class="qr-image" />'
+        else:
+            qr_base64 = base64.b64encode(qr_image_bytes).decode()
+            qr_display = f'<img src="data:image/png;base64,{qr_base64}" alt="Código QR" class="qr-image" />'
+        
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <style>
+                body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; }}
+                .header {{ background: linear-gradient(135deg, #0f9fe1 0%, #9eca3f 100%); color: white; padding: 25px; text-align: center; border-radius: 10px 10px 0 0; }}
+                .content {{ background: #f9f9f9; padding: 30px; border-radius: 0 0 10px 10px; }}
+                .code-section {{ background: white; padding: 20px; border: 2px solid #0f9fe1; border-radius: 8px; text-align: center; margin: 20px 0; }}
+                .code {{ font-family: monospace; font-size: 24px; letter-spacing: 2px; color: #1a237e; font-weight: bold; }}
+                .qr-section {{ text-align: center; margin: 20px 0; }}
+                .qr-image {{ max-width: 200px; height: auto; }}
+            </style>
+        </head>
+        <body>
+            <div class="header">
+                <h1>✅ Reserva Confirmada - {datos['nombre_cancha']}</h1>
+            </div>
+            <div class="content">
+                <p>Hola <strong>{datos['nombre_usuario']}</strong>,</p>
+                <p>Tu reserva ha sido confirmada exitosamente.</p>
+                
+                <div style="background: #f0f7ff; padding: 15px; border-radius: 8px; margin: 15px 0; border-left: 4px solid #0f9fe1;">
+                    <p><strong>📍 Cancha:</strong> {datos['nombre_cancha']}</p>
+                    <p><strong>📅 Fecha:</strong> {datos['fecha_reserva']}</p>
+                    <p><strong>⏰ Horario:</strong> {datos['hora_inicio']} - {datos['hora_fin']}</p>
+                    <p><strong>👥 Invitados:</strong> {datos['cantidad_invitados']} personas adicionales</p>
+                    <p><strong>💰 Total:</strong> ${datos['costo_total']}</p>
+                </div>
+                
+                <div class="code-section">
+                    <h3>🔑 Código para Invitados</h3>
+                    <div class="code">{datos['codigo_reserva']}</div>
+                    <p>Comparte este código con {datos['cantidad_invitados']} personas</p>
+                </div>
+                
+                <div class="qr-section">
+                    <h3>📱 Tu Código QR de Acceso</h3>
+                    {qr_display}
+                    <p>Presenta este QR para acceder a la cancha</p>
+                </div>
+                
+                <div style="background: #e8f5e9; padding: 15px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #4caf50;">
+                    <h4>📝 Instrucciones:</h4>
+                    <ol style="margin: 10px 0; padding-left: 20px;">
+                        <li>Comparte el código con tus invitados</li>
+                        <li>Ellos pueden unirse usando el código en la página principal</li>
+                        <li>Cada invitado recibirá su propio QR por email</li>
+                        <li>Presenta tu QR al personal de control de acceso</li>
+                        <li>Llega 10 minutos antes del horario reservado</li>
+                    </ol>
+                </div>
+                
+                <div style="text-align: center; margin-top: 30px;">
+                    <a href="https://olympiahub.app/dashboard" style="display: inline-block; padding: 12px 25px; background: #0f9fe1; color: white; text-decoration: none; border-radius: 5px; font-weight: bold;">
+                        📊 Ver en Dashboard
+                    </a>
+                </div>
+                
+                <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #ddd; font-size: 12px; color: #666; text-align: center;">
+                    <p>Este es un mensaje automático, por favor no respondas.</p>
+                    <p>© {datetime.now().year} OlympiaHub - Sistema de Gestión Deportiva</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        text_content = f"""
+        RESERVA CONFIRMADA
+        
+        Hola {datos['nombre_usuario']},
+        
+        Tu reserva en {datos['nombre_cancha']} ha sido confirmada.
+        
+        📅 Fecha: {datos['fecha_reserva']}
+        ⏰ Horario: {datos['hora_inicio']} - {datos['hora_fin']}
+        👥 Invitados: {datos['cantidad_invitados']} personas adicionales
+        💰 Total: ${datos['costo_total']}
+        
+        🔑 CÓDIGO PARA INVITADOS: {datos['codigo_reserva']}
+        
+        Comparte este código con {datos['cantidad_invitados']} personas.
+        Cada persona puede usar el código una vez para unirse.
+        
+        📱 Tu código QR está disponible en el dashboard.
+        
+        INSTRUCCIONES:
+        1. Comparte el código con tus invitados
+        2. Ellos pueden unirse usando el código en la página principal
+        3. Cada invitado recibirá su propio QR por email
+        4. Presenta tu QR al personal de control de acceso
+        5. Llega 10 minutos antes del horario reservado
+        
+        ---
+        Ver en dashboard: https://olympiahub.app/dashboard
+        © {datetime.now().year} OlympiaHub
+        """
+        
+        return send_email(
+            to_email=to_email,
+            subject=f"✅ Reserva Confirmada - {datos['codigo_reserva']} | {datos['nombre_cancha']}",
+            message=text_content,
+            html_content=html_content
+        )
+        
+    except Exception as e:
+        print(f"❌ Error enviando email completo: {e}")
+        return False
